@@ -1,84 +1,132 @@
-# 新对话交接说明（ROS2 Multimodal Embodied Robot Agent）
+# ROS2 Embodied Robot Agent — 交接文档（2026-08-26）
 
-> 用途：从上一个会话切换到新对话时的上下文交接。
-> 只保留未来研究方向的规划与已完成成果；工业机器人执行模块已排除。
+> 面向后续开发者 / dsh。这是从 P0 到 P7（导航）的全部工作整理，
+> 包含 git 提交、架构、运行方式、环境配置、已知问题与下一步路线。
 
-## 一、当前状态（接手点）
+## 一、项目概览
 
-- 项目已拆分为两条路线：
-  - 本科毕业设计：冻结于 `bachelor-thesis-stable` 分支（AI-Robot-Demo 仓库），
-    用于论文 / 软著 / 答辩，不再演进。
-  - 未来研究：本仓库（ROS2 Multimodal Embodied Robot Agent），独立演进。
-- 本仓库：`F:\AI-Projects\ROS2-Embodied-Robot-Agent`
-  - GitHub 远程：`github.com/jxql-airobot/ROS2-Embodied-Robot-Agent`（公开，main）
-  - 已完成的里程碑（以 `git log` 为准）：
-    1. P0：远程仓库创建并推送
-    2. P1：ROS2 闭环 Demo（NL 任务 → LLM → 动作 → cmd_vel → 差速小车），
-       含 6 个 ROS2 包 + 17 个单元测试 + 端到端无头验证（前进 ~0.9m）
-    3. Web：Streamlit 控制台（web/，HTTP + 任务链路已验证）
-    4. Vision：视觉模块（BaseVision + YOLO + VisionTool + ROS2 视觉节点）进行中
+- 仓库：`F:\AI-Projects\ROS2-Embodied-Robot-Agent`
+- 远程：`git@github.com:jxql-airobot/ROS2-Embodied-Robot-Agent.git`（公开，main）
+- 技术栈：WSL2 + Ubuntu 22.04 + ROS2 Humble + Gazebo 11 + YOLO + DeepSeek
+- 当前能力一句话：**能看（YOLO）→ 能规划（分层 LLM Agent）→ 能导航（Nav2+SLAM）→ 能行动（差速小车闭环）**
+- 当前 HEAD：`5a4af27`（已推送 origin/main）
 
-## 二、接下来的任务规划（按优先级）
+## 二、Git 提交与 Tag 总览（12 commit / 5 tag）
 
-### P2 视觉感知
+| commit | tag | 内容 |
+| --- | --- | --- |
+| `ba86948` | — | init 仓库 |
+| `c9162f4` | — | docs: 首次 session handoff |
+| `775e1ed` | — | feat(ros2): 首个闭环 demo（NL→LLM→动作→cmd_vel→运动） |
+| `3ec431a` | — | feat(web): Streamlit 控制台（任务/响应/状态/odom） |
+| `9b58b7a` | — | chore: 移除 ABB 相关内容 + legacy |
+| `a8a5ed7` | — | chore(scripts): YOLO CPU 补丁 + 安装/冒烟/清理脚本 |
+| `967d52d` | — | feat(robot_description): 前向摄像头 + Gazebo camera 插件 |
+| `ddc3d4d` | `v0.1.0-vision-pipeline` | test(vision): 无头 camera→YOLO→detections 冒烟 |
+| `760d7aa` | `v0.2.0-agent-vision` | feat: VisionTool + LLM 视觉感知闭环 |
+| `79b2dce` | `v0.3.0-vision-action` | feat: Vision→Language→Action 闭环（找杯子→靠近） |
+| `62ee4b1` | `v0.4.0-hierarchical-agent` | feat: 分层 LLM Agent（Pro/Task Manager/Flash） |
+| `5a4af27` | `v0.5.0-navigation` | feat: Nav2 + slam_toolbox 导航 + navigate 落地 |
 
-1. YOLO 独立运行 + 摄像头输入（Gazebo 相机 / USB 相机）→ 检测结果
-2. `VisionTool` 接入 Agent（`get_scene` / `find_object`）
-3. YOLO 结果进入 LLM 上下文 → LLM 根据视觉结果规划动作
+## 三、当前架构
 
-### P3 导航
+```text
+用户任务
+  → HierarchicalAgent（复杂度判断）
+      ├─ 简单（停止/前进/状态）→ Flash Executor → RobotTool → cmd_vel
+      └─ 复杂（找物+移动/导航）→ Pro Planner → Task Manager → Flash Executor
+          → VisionTool / RobotTool / NavTool → ROS2 → Gazebo Robot
+```
 
-4. Navigation2 + slam_toolbox：建图 → 定位 → 导航 → 避障
-5. `Ros2RobotTool.navigate()` 落地
+- 视觉链路：`/camera/image_raw → YOLO → /vision/detections → Ros2VisionTool → Agent`
+- 导航链路：`/scan（LiDAR）→ slam_toolbox（建图/定位）→ Nav2（规划/控制）→ /cmd_vel`
 
-### P4 多模态与语音
+## 四、核心模块与关键文件
 
-6. 语音输入：ASR → 文本任务 → Agent
-7. 多模态模型统一接口（chat / detect / 未来 audio）
-8. 简单具身任务端到端：找物 → 导航 → 反馈
+- `ros2/src/robot_interfaces`：`RobotCommand` / `RobotStatus` / `TaskExecute`
+- `ros2/src/robot_control`：`/robot_command → /cmd_vel`（move/stop/rotate）
+- `ros2/src/robot_tools`：
+  - `ros2_robot_tool.py`（move/stop/rotate + **navigate 走 Nav2 NavigateToPose**）
+  - `ros2_vision_tool.py`（订阅 `/vision/detections`，`find_object/get_objects`，含 direction）
+- `ros2/src/robot_agent`：
+  - `llm.py`（BaseLLM：mock / deepseek；`generate_action` / `plan_motion` / `plan_goal`）
+  - `action_plan.py` / `prompt.py` / `vision_response.py`
+  - `hierarchical_agent.py`（编排器 + 构建工厂）
+  - `planner/`（Task/Plan schema、ProPlanner）、`task_manager/`（优先级/调度/状态/恢复）、`executor/`（FlashExecutor）
+  - `robot_agent_node.py`（`mode=simple|hierarchical`）
+- `ros2/src/robot_description`：差速小车 URDF（base + wheels + caster + camera + **LiDAR**）
+- `ros2/src/robot_bringup`：launch / worlds（simple_world、cup.world）/ config（nav2、slam_toolbox）/ models（cup）
+- `vision/`：`yolo_detector.py`、`image_utils.py`（rgb8→BGR）、`ros2_vision_node.py`
+- `scripts/`：构建/测试/演示脚本（`wsl_build.sh`、`run_tests.sh`、`run_demo.sh`、`wsl_vision_action_demo.sh`）
 
-### P5 具身操作与研究点
+## 五、运行方式
 
-9. MoveIt2 机械臂操作 + 视觉引导抓取
-10. 长时任务记忆 / 失败恢复研究（面向 ROS2 执行错误重设计）
-11. 论文选题：具身智能体任务规划与执行闭环
+```bash
+# 构建
+bash scripts/wsl_build.sh
 
-## 三、已完成成果（可继承的设计与代码）
+# 单元测试（ROS2 包：robot_control/robot_tools/robot_agent）
+bash scripts/run_tests.sh
 
-### 核心框架（设计思想可复用，代码在本科冻结分支）
+# 基础仿真 Demo
+bash scripts/run_demo.sh            # Gazebo + RViz + robot_control + robot_agent
+ros2 run robot_agent send_task "让机器人向前移动"
 
-- LLM Agent 核心：用户任务 → 可解释 Plan → 工具调用 → 结果反馈
-- Planner：LLM 生成结构化任务计划（任务分析 / 目标 / 步骤 / 状态）
-- Memory：SQLite 长期记忆 + RAG 语义检索（向量 top-k + 关键词兜底）
-- Reflection：执行结果反思（成功 / 失败 / 重规划）
-- Recovery：错误分级与自动恢复
-- Tool 抽象：工具注册表 + 统一 run(args) 接口
-- 日志与实验方法：可复现实验、成功率 / 轮次 / 消融对比
+# 视觉→动作闭环 Demo（无头）
+bash scripts/wsl_vision_action_demo.sh
 
-### 本仓库已落地（可继续演进）
+# 导航（先仿真，再 SLAM+Nav2）
+ros2 launch robot_bringup sim.launch.py
+ros2 launch robot_bringup navigation.launch.py
+ros2 run robot_agent send_task "导航到 1.0,0.0"
+```
 
-- ROS2 执行层：`Ros2RobotTool`（move / rotate / stop / get_pose / execute_action；
-  navigate / get_sensor 预留），`robot_control` 把动作映射到 `/cmd_vel`
-- 统一 LLM 接口：`BaseLLM`（mock 默认离线可用；deepseek / openai 可切换）
-- 视觉统一接口：`BaseVision`（detect → Scene），YOLO 实现（vision/）
-- Streamlit 网页控制台（web/）
-- WSL 开发脚本：构建 / 单测 / 端到端验证 / 诊断（scripts/）
+## 六、环境与配置要点
 
-### 实验方法沉淀（本科项目）
+- **YOLO / torch**：`torch 2.6.0+cpu` + `ultralytics 8.4.115`。`torchvision 0.21.0` 与其 ABI 不兼容，
+  已 patch `autobackend.py` 的 warmup（跳过坏 import）；重装 ultralytics 后重跑
+  `scripts/wsl_patch_ultralytics.sh`。
+- **API key**：DeepSeek key 在 `F:\AI-Projects\AI-Robot-Demo\.env`，**只运行时读取、绝不提交**。
+  `robot_agent/config/agent.yaml` 里 `provider: mock`（默认离线）；切 deepseek 时设 `DEEPSEEK_API_KEY`。
+  `deepseek-pro` / `deepseek-flash` 为占位模型名，真实可用 `deepseek-chat`。
+- **Gazebo**：跑含 `model://cup` 的 demo 前需 `source /usr/share/gazebo/setup.sh` + 设
+  `GAZEBO_MODEL_PATH`（指向 `ros2/src/robot_bringup/models`）+ `GAZEBO_MODEL_DATABASE_URI=""`
+  （禁在线模型库，避免挂起）。演示脚本已内置。
+- **sudo**：WSL 内 `sudo` 需要密码，可用 `wsl -u root` 直接以 root 执行。
+- **apt 镜像**：若安装包报 404（镜像索引陈旧），先 `apt-get update`。
+- **换行符**：仓库未加 `.gitattributes`，`core.autocrlf=true`；新 clone 后 `.sh/.py` 可能变 CRLF，
+  建议补 `*.sh text eol=lf`、`*.py text eol=lf`。
 
-- 基线对比（LLM Direct / ReAct / 本文闭环）
-- 消融实验（无安全约束 / 无闭环反思 / 无动作契约）
-- 恢复能力对比（单轮 / 有反思无恢复 / 闭环）
-- RAG 分类别知识增强评估
+## 七、测试情况
 
-## 四、排除项（本路线不包含）
+共 **73 个测试**（全部通过）：
 
-- 工业机器人执行层代码与实验（保留在本科冻结分支，不参与未来开发）
-- 本科论文 / 软著 / 答辩材料（冻结于本科分支，本仓库不涉及）
+- vision 6（schema + rgb8→BGR 颜色转换）
+- robot_control 8（动作→速度映射/校验）
+- robot_tools 16（接口契约 + VisionTool 查询 + 导航 goal 解析）
+- robot_agent 43（LLM mock/DeepSeek、ActionPlan、分层 Agent 路由、优先级、失败恢复）
 
-## 五、关键路径参考
+## 八、已知问题 / 坑
 
-- 路线规划：`docs/roadmap/embodied_ai_plan.md`
-- 项目总览：`README.md`
-- ROS2 工作区：`ros2/README.md`、`web/README.md`、`vision/README.md`
-- 本科代码参考（只读）：`F:\AI-Projects\AI-Robot-Demo`（bachelor-thesis-stable 分支）
+- **cup 模型是贴图 billboard**：程序化圆柱体 YOLO 识别不出，PIL 画的杯子贴图贴在薄盒子上才稳定识别。
+- **`--symlink-install` 与新增 data 文件**：colcon symlink-install 对新增 world/模型可能报错，用普通
+  `colcon build --packages-select <pkg>` 即可。
+- **分层失败恢复**：当前是「旋转扩大搜索 + 重新观察」的简单策略，且有 `max_steps` 上限。
+- **navigate() 非阻塞**：`Ros2RobotTool.navigate()` 只发送 Nav2 goal 并返回（fire-and-forget），
+  结果在回调里打日志，Agent 不阻塞等待。
+- **导航目标格式**：`"x,y"` 或 `"x,y,yaw"`（map 系）；命名地点（如 kitchen）尚未做映射。
+- **AMCL 未启用**：当前用 slam_toolbox 提供 map→odom（SLAM 模式），未用预建地图 + AMCL。
+
+## 九、下一步路线
+
+1. **P7 语音**：`speech/` 目前是骨架，做 ASR → 文本任务 → Agent。
+2. **P8 真实小车**：把 `Ros2RobotTool` 后端从 Gazebo 换成真车驱动。
+3. **导航增强**：命名地点映射、地图保存/加载（map_server + AMCL）、Nav2 参数调优、Web 导航面板。
+4. **工程收尾**：补 `.gitattributes`；把 vision 测试并入 `run_tests.sh`。
+
+## 十、给 dsh 的建议
+
+- 先看 `README.md` 和本文档，再跑 `bash scripts/run_tests.sh` 确认环境。
+- 核心入口：`robot_agent/robot_agent_node.py` + `robot_agent/hierarchical_agent.py`。
+- 工具层：`robot_tools/ros2_robot_tool.py`、`robot_tools/ros2_vision_tool.py`。
+- 改代码前先跑测试；提交用 `feat:/fix:/refactor:/docs:/test:` 前缀；完成后 `git push origin main`。
