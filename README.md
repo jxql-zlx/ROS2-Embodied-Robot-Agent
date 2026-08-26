@@ -1,7 +1,7 @@
 # ROS2 Multimodal Embodied Robot Agent System
 
-> 状态：**P0–P6 已落地**：ROS2 闭环、视觉感知（YOLO）、
-> Vision→Language→Action 闭环、分层 LLM Agent（Pro 规划 + Task Manager + Flash 执行）。
+> 状态：**P0–P7 已落地**：ROS2 闭环、视觉感知（YOLO）、
+> Vision→Language→Action 闭环、分层 LLM Agent、SLAM + Nav2 自主导航。
 > 面向具身智能的多模态机器人智能体系统，独立演进。
 
 ## 定位
@@ -26,7 +26,7 @@
 
 | 模块 | 当前 | 未来 |
 | --- | --- | --- |
-| 执行 | ROS2 闭环（move / stop / rotate → cmd_vel，已跑通） | Navigation2 + SLAM + 机械臂 |
+| 执行 | ROS2 闭环 + Nav2/SLAM 导航（move / stop / rotate / navigate） | 机械臂 |
 | 视觉 | YOLO + Ros2VisionTool（Vision→Action 闭环） | GPT Vision / Gemini / Qwen-VL |
 | 语音 | 规划中 | ASR → 文本任务 |
 | 模型 | 多模态模型接口（不绑定单一供应商） | GPT / Gemini / Claude / Qwen / DeepSeek |
@@ -48,6 +48,20 @@ VisionTool / RobotTool / NavTool → ROS2 → Robot
   复杂任务（找物+移动 / 导航）走 Pro Planner → Task Manager → Flash Executor。
 - 优先级：`importance×0.4 + urgency×0.3 + dependency×0.2 + complexity×0.1`。
 - 配置：`ros2/src/robot_agent/config/agent.yaml`（`mode` / `planner.model` / `executor.model`）。
+
+## 导航（Navigation2 + SLAM）
+
+```text
+LiDAR (/scan) → slam_toolbox（建图 / 定位，发布 /map + map→odom）
+      → Nav2（全局规划 / 局部控制 / 避障 / 恢复）
+      → /cmd_vel → Gazebo 机器人
+```
+
+- 机器人 URDF 已带 360° 2D LiDAR（Gazebo ray sensor → `/scan`，frame `lidar_link`）。
+- 启动导航：先 `ros2 launch robot_bringup sim.launch.py`，再
+  `ros2 launch robot_bringup navigation.launch.py`。
+- `Ros2RobotTool.navigate("x,y" | "x,y,yaw")` 通过 Nav2 `NavigateToPose` action
+  在 `map` 系导航（例如 `导航到 1.0,0.0`）。
 
 ## 目录结构
 

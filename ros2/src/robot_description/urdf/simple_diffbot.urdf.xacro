@@ -111,7 +111,16 @@
     <origin xyz="0.13 0 0.02"/>
   </joint>
 
-  <link name="lidar_link"/>
+  <link name="lidar_link">
+    <visual>
+      <geometry><cylinder radius="0.04" length="0.03"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="0.04" length="0.03"/></geometry>
+    </collision>
+    <xacro:cylinder_inertia m="0.05" r="0.04" l="0.03"/>
+  </link>
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/>
     <child link="lidar_link"/>
@@ -151,6 +160,38 @@
         <distortion_k3>0.0</distortion_k3>
         <distortion_t1>0.0</distortion_t1>
         <distortion_t2>0.0</distortion_t2>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+    <sensor type="ray" name="lidar">
+      <pose>0 0 0 0 0 0</pose>
+      <visualize>false</visualize>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.141592653589793</min_angle>
+            <max_angle>3.141592653589793</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>12.0</max>
+          <resolution>0.02</resolution>
+        </range>
+      </ray>
+      <plugin name="lidar_controller" filename="libgazebo_ros_ray_sensor.so">
+        <always_on>true</always_on>
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>lidar_link</frame_name>
       </plugin>
     </sensor>
   </gazebo>
