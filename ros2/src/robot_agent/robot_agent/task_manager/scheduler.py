@@ -14,7 +14,16 @@ class Scheduler:
         self._priority_fn = priority_fn
 
     def next_task(self, tasks: List[Task]) -> Optional[Task]:
-        pending = [t for t in tasks if t.status == TaskStatus.PENDING.value]
+        by_id = {task.id: task for task in tasks}
+        pending = [
+            task for task in tasks
+            if task.status == TaskStatus.PENDING.value
+            and all(
+                dependency_id in by_id
+                and by_id[dependency_id].status == TaskStatus.COMPLETED.value
+                for dependency_id in task.depends_on
+            )
+        ]
         if not pending:
             return None
         return max(pending, key=self._priority_fn)

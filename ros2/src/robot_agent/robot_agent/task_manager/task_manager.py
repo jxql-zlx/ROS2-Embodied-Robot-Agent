@@ -18,7 +18,20 @@ class TaskManager:
         self._tasks[task.id] = task
 
     def add_plan(self, plan: Plan) -> None:
+        used_ids = set(self._tasks)
+        next_id = max(used_ids, default=0) + 1
+        remap: Dict[int, int] = {}
         for task in plan.tasks:
+            if task.id in used_ids or task.id in remap.values():
+                while next_id in used_ids or next_id in remap.values():
+                    next_id += 1
+                remap[task.id] = next_id
+                next_id += 1
+            else:
+                remap[task.id] = task.id
+        for task in plan.tasks:
+            task.id = remap[task.id]
+            task.depends_on = [remap.get(dep_id, dep_id) for dep_id in task.depends_on]
             self.add_task(task)
 
     def next_task(self) -> Optional[Task]:

@@ -250,6 +250,7 @@ class MockLLM(BaseLLM):
                     urgency=75,
                     complexity=50,
                     dependency=0,
+                    depends_on=[tasks[0].id] if tasks else [],
                 )
             )
         if not tasks:

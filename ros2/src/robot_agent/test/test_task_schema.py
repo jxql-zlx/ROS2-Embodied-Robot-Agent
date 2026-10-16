@@ -18,6 +18,7 @@ class TestTaskSchema(unittest.TestCase):
             complexity=60,
             dependency=50,
             params={"conf": 0.5},
+            depends_on=[3],
         )
         data = task.to_dict()
         self.assertEqual(Task.from_dict(data), task)

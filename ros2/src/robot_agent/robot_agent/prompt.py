@@ -59,10 +59,10 @@ PLAN_PROMPT = (
     "vision 可用 action：find_object（target=物体英文名）、observe。\n"
     "robot 可用 action：move、rotate、stop。\n"
     "每个任务字段：id、tool、action、target、name、importance、urgency、complexity、"
-    "dependency（均为 0-100 数字，dependency 表示依赖前序任务的程度）。\n"
+    "dependency（0-100 优先级分数）和 depends_on（前置任务 id 数组）。\n"
     '输出格式：{"goal":"...","tasks":[{"id":1,"tool":"vision","action":"find_object",'
     '"target":"cup","name":"find cup","importance":90,"urgency":80,"complexity":60,'
-    '"dependency":0}]}\n'
+    '"dependency":0,"depends_on":[]}]}\n'
 )
 
 

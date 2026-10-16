@@ -40,6 +40,7 @@ class ProPlanner(BasePlanner):
                     complexity=40,
                     dependency=task.dependency,
                     params={"angular_z": 0.5, "duration": 1.0},
+                    depends_on=[],
                 ),
                 Task(
                     id=nid + 1,
@@ -51,6 +52,7 @@ class ProPlanner(BasePlanner):
                     urgency=80,
                     complexity=60,
                     dependency=task.dependency,
+                    depends_on=[nid],
                 ),
             ],
         )

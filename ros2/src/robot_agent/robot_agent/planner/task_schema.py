@@ -21,6 +21,7 @@ class Task:
     dependency: float = 0.0
     status: str = "pending"
     params: Dict[str, Any] = field(default_factory=dict)
+    depends_on: List[int] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -39,6 +40,7 @@ class Task:
             dependency=float(data.get("dependency", 0.0)),
             status=str(data.get("status", "pending")),
             params=dict(data.get("params") or {}),
+            depends_on=[int(task_id) for task_id in data.get("depends_on", [])],
         )
 
 
