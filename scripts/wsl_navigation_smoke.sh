@@ -56,15 +56,24 @@ setsid ros2 launch robot_bringup navigation.launch.py mode:=mapping \
 NAV_PID=$!
 wait_topic /map nav_msgs/msg/OccupancyGrid 60
 
-echo "[2/5] rotate once to observe the environment"
+echo "[2/5] rotate and map the corridor above the central box"
 setsid ros2 run robot_control robot_control_node > "$LOG_DIR/control.log" 2>&1 &
 CONTROL_PID=$!
 sleep 2
-ros2 topic pub --once /robot_command robot_interfaces/msg/RobotCommand \
-  "{action: rotate, angular_z: 0.4, duration: 16.0}" >/dev/null
+publish_command() {
+  ros2 topic pub --once /robot_command robot_interfaces/msg/RobotCommand "$1" >/dev/null
+}
+publish_command "{action: rotate, angular_z: 0.4, duration: 16.0}"
 sleep 17
-ros2 topic pub --once /robot_command robot_interfaces/msg/RobotCommand \
-  "{action: stop}" >/dev/null
+publish_command "{action: rotate, angular_z: 0.4, duration: 3.63}"
+sleep 4
+publish_command "{action: move, linear_x: 0.3, duration: 6.0}"
+sleep 6.3
+publish_command "{action: rotate, angular_z: -0.4, duration: 3.93}"
+sleep 4.2
+publish_command "{action: move, linear_x: 0.3, duration: 12.0}"
+sleep 12.3
+publish_command "{action: stop}"
 
 echo "[3/5] save map and stop the first simulation"
 wait_topic /map nav_msgs/msg/OccupancyGrid 15
@@ -95,7 +104,11 @@ setsid ros2 launch robot_bringup navigation.launch.py mode:=localization \
   "map:=${MAP_PREFIX}.yaml" > "$LOG_DIR/localization.log" 2>&1 &
 NAV_PID=$!
 
-echo "[5/5] navigate to a nearby goal and return to the origin"
+echo "[5/7] navigate to a nearby goal and return to the origin"
 python3 "$REPO_ROOT/scripts/navigation_smoke_client.py" round-trip \
   0.8 0.0 0.0 0.0 0.0 0.0
-echo "PASS: saved-map localization and round-trip navigation completed"
+echo "[6/7] navigate around the mapped box to the far side"
+python3 "$REPO_ROOT/scripts/navigation_smoke_client.py" obstacle-trip
+echo "[7/7] verify blocked, out-of-map, and timed-out goals stop safely"
+python3 "$REPO_ROOT/scripts/navigation_smoke_client.py" failure-suite
+echo "PASS: saved-map localization, round-trip, obstacle bypass, and failure-stop checks completed"

@@ -66,7 +66,7 @@ LiDAR (/scan) → slam_toolbox（建图 / 定位，发布 /map + map→odom）
 - 保存地图后重启仿真，再运行
   `ros2 launch robot_bringup navigation.launch.py mode:=localization map:=/mnt/f/AI-Projects/ROS2-Embodied-Robot-Agent/maps/demo.yaml`。
   AMCL 初始位姿默认是仿真出生点 `(0,0,0)`，可在 `nav2_params.yaml` 调整。
-- 可用 `bash scripts/wsl_navigation_smoke.sh` 自动验证一次旋转建图、地图保存、仿真重启、AMCL 初始定位及往返导航；测试地图和日志保存在 WSL 的 `/tmp/ros2_navigation_smoke`。
+- 可用 `bash scripts/wsl_navigation_smoke.sh` 自动验证旋转建图、地图保存、仿真重启、AMCL 初始定位、往返导航、绕过已建图障碍物，以及障碍内/地图外/超时目标的停车行为。结果同时记录 `map→base_footprint` TF、AMCL 时间戳、里程计和 Gazebo 真值；测试地图和日志保存在 WSL 的 `/tmp/ros2_navigation_smoke`。
 - 该导航启动方式由 Nav2 直接控制 `/cmd_vel`。不要同时启动会发布 `/cmd_vel` 的
   `robot_control_node`，否则两个控制器会争用底盘；Agent 与 Nav2 的速度仲裁将在后续阶段接入。
 - `Ros2RobotTool.navigate("x,y" | "x,y,yaw")` 通过 Nav2 `NavigateToPose` action
