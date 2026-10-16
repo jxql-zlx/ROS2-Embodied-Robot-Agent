@@ -8,6 +8,7 @@ SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 ROS2_DIR="$REPO_ROOT/ros2"
 
+bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_tools robot_agent || exit 1
 cd "$ROS2_DIR"
 source install/setup.bash
 source /usr/share/gazebo/setup.sh 2>/dev/null || true
@@ -21,21 +22,22 @@ LOG=/tmp/vision_action_demo.log
 export GAZEBO_MODEL_PATH="$MODELS:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI=""
 
-bash "$SCRIPTS_DIR/wsl_cleanup.sh" >/dev/null 2>&1 || true
-
-ros2 launch robot_bringup demo.launch.py world:=$WORLD gui:=false rviz:=false > "$LOG" 2>&1 &
+setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
-python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
+setsid python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
   --ros-args -p model_path:="$MODEL" -p camera_topic:=/camera/image_raw -p conf:=0.25 \
   > /tmp/vision_action_node.log 2>&1 &
 VISION_PID=$!
 
 cleanup() {
-  kill -INT "${VISION_PID:-}" 2>/dev/null || true
-  kill -INT "$LAUNCH_PID" 2>/dev/null || true
+  kill -INT -- -"$VISION_PID" 2>/dev/null || true
+  kill -INT -- -"$LAUNCH_PID" 2>/dev/null || true
   sleep 2
-  bash "$SCRIPTS_DIR/wsl_cleanup.sh" >/dev/null 2>&1 || true
+  kill -TERM -- -"$VISION_PID" 2>/dev/null || true
+  kill -TERM -- -"$LAUNCH_PID" 2>/dev/null || true
+  wait "$VISION_PID" 2>/dev/null || true
+  wait "$LAUNCH_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -51,7 +53,14 @@ BASELINE=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo "$BASELINE"
 
 echo ">> sending task: 找杯子"
-ros2 run robot_agent send_task "找杯子" --service 2>&1 || true
+TASK_OUTPUT=$(ros2 run robot_agent send_task "找杯子" --service --timeout 40 2>&1)
+TASK_RESULT=$?
+echo "$TASK_OUTPUT"
+if [ "$TASK_RESULT" -ne 0 ]; then
+  echo "FAIL: approach task did not complete successfully"
+  tail -30 "$LOG"
+  exit 1
+fi
 
 echo ">> waiting for motion ..."
 sleep 6
@@ -60,7 +69,8 @@ echo ">> final pose"
 FINAL=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo "$FINAL"
 
-python3 - "$BASELINE" "$FINAL" <<'PY'
+python3 - "$BASELINE" "$FINAL" "$TASK_OUTPUT" <<'PY'
+import json
 import math
 import re
 import sys
@@ -79,9 +89,12 @@ if b is None or f is None:
 
 dist = math.hypot(f[0] - b[0], f[1] - b[1])
 print(f"displacement={dist:.3f} m (threshold=0.05)")
-if dist >= 0.05:
-    print("PASS: robot moved toward the detected cup")
+action_line = next((line for line in sys.argv[3].splitlines() if line.startswith("action_json:")), "")
+data = json.loads(action_line.split(":", 1)[1]) if action_line else {}
+distance = data.get("distance")
+if dist >= 0.05 and data.get("available") and isinstance(distance, (int, float)) and 0.4 <= distance <= 0.65:
+    print(f"PASS: approach completed at measured standoff {distance:.3f} m")
     sys.exit(0)
-print("FAIL: robot did not move")
+print(f"FAIL: movement or final range invalid: {distance}")
 sys.exit(2)
 PY

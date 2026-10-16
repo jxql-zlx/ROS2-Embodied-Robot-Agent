@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from threading import Condition, Event
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,8 @@ from action_msgs.msg import GoalStatus
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
 from robot_interfaces.msg import RobotCommand, RobotStatus
 
 from robot_tools.base_robot_tool import BaseRobotTool
@@ -59,6 +62,13 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self._nav_client = ActionClient(self, NavigateToPose, navigate_server)
         self._latest_pose: Optional[Dict[str, float]] = None
         self._latest_status: Optional[RobotStatus] = None
+        self._latest_scan: Optional[LaserScan] = None
+        self._scan_received_at = 0.0
+        self._scan_condition = Condition()
+        self._scan_history = deque(maxlen=10)
+        self._scan_sub = self.create_subscription(
+            LaserScan, "/scan", self._on_scan, qos_profile_sensor_data
+        )
         self._status_condition = Condition()
         self.get_logger().info(
             f"Ros2RobotTool ready: cmd->{command_topic}, odom->{odom_topic}, "
@@ -84,6 +94,42 @@ class Ros2RobotTool(Node, BaseRobotTool):
         with self._status_condition:
             self._latest_status = msg
             self._status_condition.notify_all()
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        with self._scan_condition:
+            self._latest_scan = msg
+            self._scan_received_at = time.monotonic()
+            self._scan_history.append((self._scan_received_at, self.front_range(msg)))
+            self._scan_condition.notify_all()
+
+    def wait_for_front_range(self, timeout_sec: float = 3.0) -> Dict[str, Any]:
+        """Require three consistent scans after allowing the base to settle."""
+        started = time.monotonic()
+        with self._scan_condition:
+            while True:
+                samples = [value for stamp, value in self._scan_history if stamp > started + 0.5]
+                recent = samples[-3:]
+                if len(recent) == 3 and all(value is not None for value in recent):
+                    if max(recent) - min(recent) <= 0.03:
+                        return {"name": "front_range", "available": True,
+                                "distance": sorted(recent)[1], "frame_id": "lidar_link"}
+                remaining = started + timeout_sec - time.monotonic()
+                if remaining <= 0:
+                    return {"name": "front_range", "available": False, "distance": None}
+                self._scan_condition.wait(remaining)
+
+    @staticmethod
+    def front_range(scan: LaserScan) -> Optional[float]:
+        """Closest valid return within ten degrees of the robot's forward axis."""
+        if scan.header.frame_id != "lidar_link" or scan.angle_increment <= 0:
+            return None
+        ranges = [
+            value for index, value in enumerate(scan.ranges)
+            if abs(scan.angle_min + index * scan.angle_increment) <= math.radians(10)
+            and math.isfinite(value)
+            and scan.range_min <= value <= scan.range_max
+        ]
+        return min(ranges) if ranges else None
 
     def status_stamp(self) -> Optional[tuple[int, int]]:
         """Return a snapshot token for waiting on a later motion status."""
@@ -241,6 +287,15 @@ class Ros2RobotTool(Node, BaseRobotTool):
         return self._latest_pose
 
     def get_sensor(self, name: str) -> Dict[str, Any]:
+        if name == "front_range":
+            scan = self._latest_scan
+            age = time.monotonic() - self._scan_received_at
+            distance = self.front_range(scan) if scan is not None and age <= 1.0 else None
+            return {
+                "name": name, "available": distance is not None,
+                "distance": distance, "age_sec": age,
+                "frame_id": "lidar_link",
+            }
         # Reserved interface: real sensor topics (camera /scan) land in the
         # vision & navigation milestones. Return honest availability info.
         return {

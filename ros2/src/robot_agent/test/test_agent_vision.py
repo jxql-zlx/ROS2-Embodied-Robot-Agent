@@ -75,9 +75,18 @@ class _LoopVisionTool:
 
 
 class _LoopRobotTool(_FakeRobotTool):
-    def __init__(self):
+    def __init__(self, distances=None):
         super().__init__()
         self.wait_count = 0
+        self.distances = distances or [10.0]
+
+    def get_sensor(self, _name):
+        distance = self.distances[min(self.wait_count, len(self.distances) - 1)]
+        return {"available": distance is not None, "distance": distance}
+
+    def stop(self):
+        self.actions.append({"action": "stop"})
+        return True
 
     def status_stamp(self):
         return (0, self.wait_count)
@@ -178,6 +187,47 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("未收到新视觉帧", response)
         self.assertEqual(len(robot.actions), 1)
+
+    def test_approach_succeeds_at_measured_standoff_distance(self):
+        scenes = [
+            {"found": True, "observed_at": stamp, "objects": [
+                {"name": "cup", "direction": "center"}
+            ]} for stamp in (1, 2)
+        ]
+        robot = _LoopRobotTool(distances=[1.0, 0.6])
+        self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_LoopVisionTool(scenes))
+        ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
+        self.assertTrue(ok)
+        self.assertIn("停止距离", response)
+        self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
+
+    def test_approach_does_not_move_without_range_feedback(self):
+        robot = _LoopRobotTool(distances=[None])
+        vision = _LoopVisionTool([{"found": True, "objects": [{"direction": "center"}]}])
+        self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
+        ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
+        self.assertFalse(ok)
+        self.assertIn("测距不可用", response)
+        self.assertEqual(robot.actions, [])
+
+    def test_near_blind_zone_return_is_not_reported_as_arrival(self):
+        robot = _LoopRobotTool(distances=[0.12])
+        vision = _LoopVisionTool([{"found": True, "objects": [{"direction": "center"}]}])
+        self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
+        ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
+        self.assertFalse(ok)
+        self.assertIn("距离不足", response)
+        self.assertEqual([a["action"] for a in robot.actions], ["stop"])
+
+    def test_final_motion_step_is_shortened_to_remaining_clearance(self):
+        scenes = [{"found": True, "observed_at": stamp, "objects": [
+            {"name": "cup", "direction": "center"}
+        ]} for stamp in (1, 2)]
+        robot = _LoopRobotTool(distances=[0.7, 0.62])
+        self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_LoopVisionTool(scenes))
+        ok, _, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
+        self.assertTrue(ok)
+        self.assertAlmostEqual(robot.actions[0]["duration"], (0.7 - 0.65) / 0.3)
 
 
 if __name__ == "__main__":

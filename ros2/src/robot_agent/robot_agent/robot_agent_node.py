@@ -49,6 +49,7 @@ class RobotAgentNode(Node):
         self.declare_parameter("vision_detections_topic", "/vision/detections")
         self.declare_parameter("mode", "simple")
         self.declare_parameter("agent_config", "")
+        self.declare_parameter("approach_stop_distance", 0.65)
 
         task_input_topic = self.get_parameter("task_input_topic").value
         task_service = self.get_parameter("task_service").value
@@ -193,8 +194,24 @@ class RobotAgentNode(Node):
             closed_loop = callable(wait_for_scene) and callable(wait_for_motion)
             max_steps = 3 if closed_loop else 1
             last_action_json = ""
+            clearance = None
 
-            for step in range(max_steps):
+            for step in range(max_steps + 1):
+                get_sensor = getattr(self._tool, "get_sensor", None)
+                if closed_loop and callable(get_sensor):
+                    clearance = clearance or get_sensor("front_range")
+                    if not clearance.get("available"):
+                        return False, "前方激光测距不可用或已过期，停止接近", ""
+                    objects = vision.get("objects", [])
+                    centered = bool(objects) and objects[0].get("direction") == "center"
+                    stop_distance = float(self.get_parameter("approach_stop_distance").value)
+                    if float(clearance["distance"]) <= stop_distance:
+                        stopped = self._tool.stop()
+                        if centered and stopped and float(clearance["distance"]) >= stop_distance - 0.25:
+                            return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
+                        return False, "前方距离不足，已停止接近", json.dumps(clearance, ensure_ascii=False)
+                if step == max_steps:
+                    return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
                 motion = self._llm.plan_motion(task, vision)
                 last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
                 if motion.action == "stop":
@@ -204,6 +221,11 @@ class RobotAgentNode(Node):
                     max(0.0, motion.duration) or APPROACH_MAX_STEP_DURATION_SEC,
                     APPROACH_MAX_STEP_DURATION_SEC,
                 )
+                if clearance and motion.action == "move" and motion.linear_x > 0:
+                    margin = max(0.0, float(clearance["distance"]) - stop_distance)
+                    # The controller updates at 10 Hz; shorten the last step
+                    # to the remaining distance, with one update as minimum.
+                    motion.duration = min(motion.duration, max(0.1, margin / motion.linear_x))
                 last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
 
                 status_stamp = self._tool.status_stamp() if closed_loop else None
@@ -221,6 +243,11 @@ class RobotAgentNode(Node):
                     if callable(stop):
                         stop()
                     return False, "运动未能在时限内完成", last_action_json
+
+                wait_for_range = getattr(self._tool, "wait_for_front_range", None)
+                clearance = wait_for_range() if callable(wait_for_range) else None
+                if clearance is not None and not clearance.get("available"):
+                    return False, "运动后未获得稳定的前方测距", ""
 
                 # A frame from during the motion is newer than the previous
                 # observation but cannot verify the completed motion.
