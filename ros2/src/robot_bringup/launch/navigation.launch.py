@@ -57,6 +57,7 @@ def generate_launch_description() -> LaunchDescription:
             "use_sim_time": "true",
             "params_file": nav2_params,
             "autostart": "true",
+            "use_composition": "False",
         }.items(),
         condition=IfCondition(localization),
     )
