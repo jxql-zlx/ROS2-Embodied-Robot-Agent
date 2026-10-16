@@ -30,12 +30,14 @@ def parse_nav_goal_string(goal: str) -> Optional[tuple[float, float, float]]:
 
     Returns None when the goal is empty or malformed.
     """
-    parts = [p.strip() for p in (goal or "").split(",") if p.strip()]
+    parts = [p.strip() for p in (goal or "").split(",")]
+    if any(not part for part in parts):
+        return None
     try:
         nums = [float(p) for p in parts]
     except ValueError:
         return None
-    if not nums:
+    if not nums or len(nums) > 3 or not all(math.isfinite(value) for value in nums):
         return None
     x = nums[0]
     y = nums[1] if len(nums) > 1 else 0.0

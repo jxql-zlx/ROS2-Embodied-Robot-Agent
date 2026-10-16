@@ -22,6 +22,10 @@ class TestParseNavGoalString(unittest.TestCase):
     def test_malformed(self):
         self.assertIsNone(parse_nav_goal_string("abc"))
         self.assertIsNone(parse_nav_goal_string("1.0,abc"))
+        self.assertIsNone(parse_nav_goal_string("nan,0"))
+        self.assertIsNone(parse_nav_goal_string("inf,0"))
+        self.assertIsNone(parse_nav_goal_string("1,2,3,4"))
+        self.assertIsNone(parse_nav_goal_string("1,,2"))
 
     def test_whitespace_tolerated(self):
         self.assertEqual(parse_nav_goal_string(" 1.0 , 0.5 "), (1.0, 0.5, 0.0))

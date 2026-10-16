@@ -58,8 +58,16 @@ LiDAR (/scan) → slam_toolbox（建图 / 定位，发布 /map + map→odom）
 ```
 
 - 机器人 URDF 已带 360° 2D LiDAR（Gazebo ray sensor → `/scan`，frame `lidar_link`）。
-- 启动导航：先 `ros2 launch robot_bringup sim.launch.py`，再
-  `ros2 launch robot_bringup navigation.launch.py`。
+- 建图：先启动 `sim.launch.py`，再运行
+  `ros2 launch robot_bringup navigation.launch.py mode:=mapping`（此模式只启动 SLAM）。
+  另开终端运行 `ros2 run robot_control robot_control_node`，再通过 Agent 或
+  `/robot_command` 驱动机器人覆盖环境；保存地图时运行
+  `bash scripts/wsl_save_map.sh /mnt/f/AI-Projects/ROS2-Embodied-Robot-Agent/maps/demo`。
+- 保存地图后重启仿真，再运行
+  `ros2 launch robot_bringup navigation.launch.py mode:=localization map:=/mnt/f/AI-Projects/ROS2-Embodied-Robot-Agent/maps/demo.yaml`。
+  AMCL 初始位姿默认是仿真出生点 `(0,0,0)`，可在 `nav2_params.yaml` 调整。
+- 该导航启动方式由 Nav2 直接控制 `/cmd_vel`。不要同时启动会发布 `/cmd_vel` 的
+  `robot_control_node`，否则两个控制器会争用底盘；Agent 与 Nav2 的速度仲裁将在后续阶段接入。
 - `Ros2RobotTool.navigate("x,y" | "x,y,yaw")` 通过 Nav2 `NavigateToPose` action
   在 `map` 系导航（例如 `导航到 1.0,0.0`）。
 
