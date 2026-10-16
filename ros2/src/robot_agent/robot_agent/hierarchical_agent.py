@@ -42,11 +42,13 @@ class HierarchicalAgent:
         executor: BaseExecutor,
         task_manager: TaskManager | None = None,
         max_steps: int = 20,
+        max_recoveries: int = 3,
     ) -> None:
         self._planner = planner
         self._executor = executor
         self._task_manager = task_manager or TaskManager()
         self._max_steps = max_steps
+        self._max_recoveries = max(0, max_recoveries)
 
     def run(self, goal: str) -> List[TaskResult]:
         if is_simple(goal):
@@ -57,6 +59,8 @@ class HierarchicalAgent:
         self._task_manager.add_plan(plan)
         results: List[TaskResult] = []
         context = {"goal": goal}
+        recoveries = 0
+        steps_taken = 0
 
         for _ in range(self._max_steps):
             task = self._task_manager.next_task()
@@ -64,14 +68,38 @@ class HierarchicalAgent:
                 break
             self._task_manager.set_status(task.id, TaskStatus.RUNNING)
             result = self._executor.execute(task, context)
+            steps_taken += 1
             results.append(result)
             if result.success:
                 self._task_manager.mark_completed(task.id)
                 context.update(result.data or {})
             else:
                 self._task_manager.mark_failed(task.id)
+                if recoveries >= self._max_recoveries:
+                    results.append(
+                        TaskResult(
+                            task.id,
+                            False,
+                            f"recovery limit reached ({self._max_recoveries})",
+                        )
+                    )
+                    continue
                 recovery = self._planner.replan(goal, task, result)
                 self._task_manager.add_plan(recovery)
+                recoveries += 1
+
+        pending = [
+            task for task in self._task_manager.tasks()
+            if task.status == TaskStatus.PENDING.value
+        ]
+        if pending:
+            if steps_taken >= self._max_steps:
+                message = f"max steps reached ({self._max_steps}) with pending tasks"
+            else:
+                message = "pending tasks are blocked by unresolved dependencies"
+            results.append(
+                TaskResult(-1, False, message, data={"pending_task_ids": [t.id for t in pending]})
+            )
         return results
 
 

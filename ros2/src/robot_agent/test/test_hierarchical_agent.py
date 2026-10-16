@@ -3,6 +3,10 @@
 import unittest
 
 from robot_agent.hierarchical_agent import build_hierarchical_agent
+from robot_agent.executor.base_executor import BaseExecutor, TaskResult
+from robot_agent.hierarchical_agent import HierarchicalAgent
+from robot_agent.planner.base_planner import BasePlanner
+from robot_agent.planner.task_schema import Plan, Task
 
 
 class _FakeRobotTool:
@@ -49,6 +53,32 @@ class _FakeVisionTool:
         self.last_query = ("scene", "")
         return {"found": self.found, "objects": []}
 
+
+class _FixedPlanner(BasePlanner):
+    def __init__(self):
+        self.replan_calls = 0
+
+    def plan(self, goal):
+        return Plan(
+            goal=goal,
+            tasks=[
+                Task(id=1, tool="robot", action="first"),
+                Task(id=2, tool="robot", action="second"),
+            ],
+        )
+
+    def replan(self, goal, task, result):
+        self.replan_calls += 1
+        return Plan(goal=goal, tasks=[Task(id=1, tool="robot", action="retry")])
+
+
+class _FixedExecutor(BaseExecutor):
+    def __init__(self, success=True):
+        self.success = success
+
+    def execute(self, task, context):
+        return TaskResult(task.id, self.success, "done" if self.success else "failed")
+
     def get_scene(self):
         return {"found": self.found, "objects": []}
 
@@ -79,6 +109,22 @@ class TestHierarchicalAgent(unittest.TestCase):
         results = agent.run("找到杯子然后移动过去")
         self.assertTrue(any(not r.success for r in results))
         self.assertTrue(any(a.get("action") == "rotate" for a in robot.actions))
+
+    def test_step_limit_reports_remaining_tasks_as_failure(self):
+        agent = HierarchicalAgent(_FixedPlanner(), _FixedExecutor(), max_steps=1)
+        results = agent.run("navigate multi-step goal")
+        self.assertFalse(results[-1].success)
+        self.assertIn("max steps reached", results[-1].message)
+        self.assertTrue(results[-1].data["pending_task_ids"])
+
+    def test_recovery_limit_stops_replanning(self):
+        planner = _FixedPlanner()
+        agent = HierarchicalAgent(
+            planner, _FixedExecutor(success=False), max_steps=10, max_recoveries=1
+        )
+        results = agent.run("navigate multi-step goal")
+        self.assertEqual(planner.replan_calls, 1)
+        self.assertTrue(any("recovery limit reached" in result.message for result in results))
 
 
 if __name__ == "__main__":
