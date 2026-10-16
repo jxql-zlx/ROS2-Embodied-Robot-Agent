@@ -10,6 +10,7 @@ Outputs:
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, Optional
 
 import rclpy
@@ -221,11 +222,14 @@ class RobotAgentNode(Node):
                         stop()
                     return False, "运动未能在时限内完成", last_action_json
 
-                observed_at = float(vision.get("observed_at", 0.0))
-                scene = wait_for_scene(observed_at, timeout_sec=5.0)
+                # A frame from during the motion is newer than the previous
+                # observation but cannot verify the completed motion.
+                motion_completed_at = time.time()
+                scene = wait_for_scene(motion_completed_at, timeout_sec=5.0)
                 if scene is None:
                     return False, "运动后未收到新视觉帧", last_action_json
-                vision = find_target()
+                query_scene = getattr(self._vision_tool, "query_scene", None)
+                vision = query_scene(scene, goal) if callable(query_scene) else find_target()
                 if vision.get("stale"):
                     return False, "运动后的视觉结果已过期", json.dumps(vision, ensure_ascii=False)
                 if not vision.get("found"):

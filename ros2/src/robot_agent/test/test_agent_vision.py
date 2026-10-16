@@ -1,6 +1,7 @@
 """Integration-style test: the agent routes vision/approach actions to tools."""
 
 import unittest
+from unittest.mock import patch
 
 import rclpy
 
@@ -54,16 +55,23 @@ class _LoopVisionTool:
         self.scenes = scenes
         self.index = 0
         self.wait_count = 0
+        self.cutoffs = []
+        self.queried_stamps = []
 
     def find_object(self, _name):
         return dict(self.scenes[self.index])
 
     def wait_for_new_scene(self, after_observed_at, timeout_sec):
         self.wait_count += 1
+        self.cutoffs.append(after_observed_at)
         if self.index + 1 >= len(self.scenes):
             return None
         self.index += 1
         return dict(self.scenes[self.index])
+
+    def query_scene(self, scene, _name):
+        self.queried_stamps.append(scene["observed_at"])
+        return dict(scene)
 
 
 class _LoopRobotTool(_FakeRobotTool):
@@ -128,7 +136,8 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(response, "执行层受理失败")
 
-    def test_approach_uses_new_frame_after_each_completed_motion(self):
+    @patch("robot_agent.robot_agent_node.time.time", return_value=100.0)
+    def test_approach_uses_new_frame_after_each_completed_motion(self, _clock):
         def scene(stamp, direction):
             return {
                 "found": True,
@@ -138,7 +147,7 @@ class TestAgentApproachRouting(unittest.TestCase):
             }
 
         vision = _LoopVisionTool([
-            scene(1, "left"), scene(2, "center"), scene(3, "center"), scene(4, "center")
+            scene(1, "left"), scene(101, "center"), scene(102, "center"), scene(103, "center")
         ])
         robot = _LoopRobotTool()
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
@@ -149,6 +158,8 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertIn("步数上限", response)
         self.assertEqual(vision.wait_count, 3)
         self.assertEqual(robot.wait_count, 3)
+        self.assertEqual(vision.cutoffs, [100.0, 100.0, 100.0])
+        self.assertEqual(vision.queried_stamps, [101, 102, 103])
         self.assertEqual(robot.actions[0]["action"], "rotate")
         self.assertEqual(robot.actions[1]["action"], "move")
         self.assertLessEqual(robot.actions[1]["duration"], 0.5)

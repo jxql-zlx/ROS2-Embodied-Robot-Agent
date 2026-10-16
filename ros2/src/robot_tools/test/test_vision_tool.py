@@ -1,6 +1,7 @@
 """Unit tests for Ros2VisionTool query logic (no running node needed)."""
 
 import unittest
+from unittest.mock import patch
 
 from robot_tools.ros2_vision_tool import Ros2VisionTool
 
@@ -17,6 +18,17 @@ SCENE = {
 
 
 class TestVisionToolQuery(unittest.TestCase):
+    @patch("robot_tools.ros2_vision_tool.time.time", return_value=100.0)
+    def test_query_scene_keeps_detections_and_timestamp_from_same_snapshot(self, _clock):
+        tool = object.__new__(Ros2VisionTool)
+        tool._max_age_sec = 2.5
+        tool._latest = {"observed_at": 100.0, "objects": []}
+        scene = {**SCENE, "observed_at": 99.0}
+        result = tool.query_scene(scene, "cup")
+        self.assertTrue(result["found"])
+        self.assertEqual(result["observed_at"], 99.0)
+        self.assertEqual(result["age_sec"], 1.0)
+
     def test_find_object_matches_case_insensitive(self):
         result = Ros2VisionTool._find(SCENE, "CUP")
         self.assertTrue(result["found"])

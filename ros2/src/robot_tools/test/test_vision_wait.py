@@ -26,6 +26,10 @@ class TestFreshSceneWait(unittest.TestCase):
         self.tool._latest = {"observed_at": 10.0}
         self.assertIsNone(self.tool.wait_for_new_scene(10.0, timeout_sec=0.001))
 
+    def test_frame_from_during_motion_does_not_verify_completed_motion(self):
+        self.tool._latest = {"observed_at": 11.0}
+        self.assertIsNone(self.tool.wait_for_new_scene(12.0, timeout_sec=0.001))
+
 
 if __name__ == "__main__":
     unittest.main()

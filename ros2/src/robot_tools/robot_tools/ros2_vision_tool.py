@@ -34,6 +34,8 @@ class Ros2VisionTool(Node):
     def _on_scene(self, msg: String) -> None:
         try:
             scene = json.loads(msg.data)
+            if not isinstance(scene, dict) or not isinstance(scene.get("objects", []), list):
+                raise TypeError("scene must be an object with an objects list")
             with self._scene_condition:
                 self._latest = scene
                 self._scene_condition.notify_all()
@@ -79,7 +81,15 @@ class Ros2VisionTool(Node):
         return self._query_latest(object_name, min_confidence)
 
     def _query_latest(self, object_name: str, min_confidence: float) -> Dict[str, Any]:
-        fresh, age = self._freshness(self._latest, time.time(), self._max_age_sec)
+        with self._scene_condition:
+            scene = self._latest
+        return self.query_scene(scene, object_name, min_confidence)
+
+    def query_scene(
+        self, scene: Optional[Dict[str, Any]], object_name: str = "", min_confidence: float = 0.0
+    ) -> Dict[str, Any]:
+        """Query one scene snapshot, including its matching freshness metadata."""
+        fresh, age = self._freshness(scene, time.time(), self._max_age_sec)
         if not fresh:
             return {
                 "found": False,
@@ -87,11 +97,11 @@ class Ros2VisionTool(Node):
                 "stale": True,
                 "age_sec": round(age, 3) if age is not None else None,
             }
-        result = self._find(self._latest, object_name, min_confidence)
+        result = self._find(scene, object_name, min_confidence)
         result.update({
             "stale": False,
             "age_sec": round(age, 3),
-            "observed_at": float(self._latest["observed_at"]),
+            "observed_at": float(scene["observed_at"]),
         })
         return result
 
