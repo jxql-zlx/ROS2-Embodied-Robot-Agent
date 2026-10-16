@@ -22,6 +22,11 @@ class _Robot:
         return self.action_result
 
 
+class _StaleVision:
+    def find_object(self, _name):
+        return {"found": False, "objects": [], "stale": True}
+
+
 class TestFlashExecutor(unittest.TestCase):
     def test_navigation_task_reports_final_success(self):
         robot = _Robot(nav_result=True)
@@ -47,6 +52,13 @@ class TestFlashExecutor(unittest.TestCase):
         )
         self.assertFalse(result.success)
         self.assertIn("rejected", result.message)
+
+    def test_stale_vision_does_not_count_as_a_valid_observation(self):
+        result = FlashExecutor(vision_tool=_StaleVision()).execute(
+            Task(id=1, tool="vision", action="find_object", target="cup"), {}
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, "vision result is stale")
 
 
 if __name__ == "__main__":

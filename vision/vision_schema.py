@@ -25,6 +25,7 @@ class Scene:
     image_height: int = 0
     objects: List[Detection] = field(default_factory=list)
     source: str = ""          # backend name, e.g. "yolo"
+    observed_at: float = 0.0   # Unix time when processing of this frame began
 
     def find(self, name: str) -> List[Detection]:
         """Return detections whose name contains `name` (case-insensitive)."""
@@ -36,6 +37,7 @@ class Scene:
             "image_width": self.image_width,
             "image_height": self.image_height,
             "source": self.source,
+            "observed_at": self.observed_at,
             "objects": [
                 {"name": d.name, "confidence": d.confidence, "bbox": d.bbox, "center": d.center}
                 for d in self.objects

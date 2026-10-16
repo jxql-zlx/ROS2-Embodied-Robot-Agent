@@ -26,9 +26,11 @@ class TestScene(unittest.TestCase):
         scene = Scene(
             objects=[Detection(name="cup", confidence=0.92, bbox=[1, 2, 3, 4])],
             source="yolo",
+            observed_at=123.0,
         )
         data = scene.to_dict()
         self.assertEqual(data["objects"][0]["name"], "cup")
+        self.assertEqual(data["observed_at"], 123.0)
         self.assertIn("cup", scene.to_json())
 
 

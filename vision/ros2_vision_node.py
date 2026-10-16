@@ -8,6 +8,7 @@ Usage (WSL, ROS env sourced):
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
@@ -53,8 +54,10 @@ class VisionNode(Node):
             return
         self._last_publish = now
         try:
+            observed_at = time.time()
             frame = self._to_bgr(msg)
             scene = self._detector.detect(frame)
+            scene.observed_at = observed_at
             text = scene.to_json()
             self._pub.publish(String(data=text))
             self.get_logger().info(

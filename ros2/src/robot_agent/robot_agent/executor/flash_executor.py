@@ -45,6 +45,8 @@ class FlashExecutor(BaseExecutor):
             return TaskResult(task.id, False, "vision tool unavailable")
         if task.action in ("find_object", "find"):
             data = self._vision.find_object(task.target)
+            if isinstance(data, dict) and data.get("stale"):
+                return TaskResult(task.id, False, "vision result is stale", data=data)
             if isinstance(data, dict) and not data.get("found", True):
                 return TaskResult(task.id, False, f"no target found: {task.target}", data=data)
             return TaskResult(task.id, True, "vision ok", data={"vision": data})
@@ -52,6 +54,10 @@ class FlashExecutor(BaseExecutor):
             data = self._vision.get_objects()
         else:
             data = self._vision.get_scene()
+        if data is None:
+            return TaskResult(task.id, False, "vision result unavailable")
+        if isinstance(data, dict) and data.get("stale"):
+            return TaskResult(task.id, False, "vision result is stale", data=data)
         return TaskResult(task.id, True, "vision ok", data={"vision": data})
 
     def _run_robot(self, task: Task, context: Dict[str, Any]) -> TaskResult:

@@ -66,6 +66,22 @@ class TestVisionToolQuery(unittest.TestCase):
         obj = Ros2VisionTool._find({"objects": [{"name": "cup", "confidence": 0.9, "center": [10, 20]}]}, "cup")["objects"][0]
         self.assertEqual(obj["direction"], "unknown")
 
+    def test_scene_timestamp_freshness(self):
+        fresh, age = Ros2VisionTool._freshness({"observed_at": 98.0}, 100.0, 2.5)
+        self.assertTrue(fresh)
+        self.assertEqual(age, 2.0)
+
+    def test_missing_expired_and_future_timestamps_are_stale(self):
+        self.assertEqual(Ros2VisionTool._freshness({}, 100.0, 2.5), (False, None))
+        self.assertEqual(
+            Ros2VisionTool._freshness({"observed_at": 90.0}, 100.0, 2.5),
+            (False, 10.0),
+        )
+        self.assertEqual(
+            Ros2VisionTool._freshness({"observed_at": 101.0}, 100.0, 2.5),
+            (False, None),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
