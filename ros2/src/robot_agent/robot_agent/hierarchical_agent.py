@@ -75,6 +75,8 @@ class HierarchicalAgent:
                 context.update(result.data or {})
             else:
                 self._task_manager.mark_failed(task.id)
+                if (result.data or {}).get("recoverable") is False:
+                    continue
                 if recoveries >= self._max_recoveries:
                     results.append(
                         TaskResult(
@@ -125,5 +127,8 @@ def build_hierarchical_agent(
         return MockLLM()
 
     planner = ProPlanner(_make_llm("planner"))
-    executor = FlashExecutor(robot_tool=robot_tool, vision_tool=vision_tool, llm=_make_llm("executor"))
+    executor = FlashExecutor(
+        robot_tool=robot_tool, vision_tool=vision_tool, llm=_make_llm("executor"),
+        approach_stop_distance=float(config.get("approach_stop_distance", 0.65)),
+    )
     return HierarchicalAgent(planner=planner, executor=executor)

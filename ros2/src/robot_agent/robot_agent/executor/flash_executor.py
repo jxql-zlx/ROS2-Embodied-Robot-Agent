@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import json
 
+from robot_agent.approach import ApproachController
 from robot_agent.executor.base_executor import BaseExecutor, TaskResult
 from robot_agent.llm import BaseLLM, LLMError
 from robot_agent.planner.task_schema import Task
@@ -17,10 +19,21 @@ class FlashExecutor(BaseExecutor):
         robot_tool: Any = None,
         vision_tool: Any = None,
         llm: Optional[BaseLLM] = None,
+        approach_stop_distance: float = 0.65,
     ) -> None:
         self._robot = robot_tool
         self._vision = vision_tool
         self._llm = llm
+        self._approach_stop_distance = approach_stop_distance
+
+    def _run_approach(self, task: Task, context: Dict[str, Any], target: str) -> TaskResult:
+        if self._robot is None or self._vision is None or self._llm is None:
+            return TaskResult(task.id, False, "approach tools unavailable", {"recoverable": False})
+        success, message, payload = ApproachController(
+            self._robot, self._vision, self._llm, self._approach_stop_distance
+        ).run(target, context.get("goal", task.name or target))
+        data = {"approach": json.loads(payload) if payload else {}, "recoverable": False}
+        return TaskResult(task.id, success, message, data)
 
     def execute(self, task: Task, context: Dict[str, Any]) -> TaskResult:
         try:
@@ -63,11 +76,15 @@ class FlashExecutor(BaseExecutor):
     def _run_robot(self, task: Task, context: Dict[str, Any]) -> TaskResult:
         if self._robot is None:
             return TaskResult(task.id, False, "robot tool unavailable")
+        if task.action == "approach":
+            return self._run_approach(task, context, task.target)
         if task.action == "infer":
             if self._llm is None:
                 return TaskResult(task.id, False, "no LLM for infer action")
             plan = self._llm.generate_action(task.target)
-            if plan.action == "vision" or plan.action == "approach":
+            if plan.action == "approach":
+                return self._run_approach(task, context, plan.goal)
+            if plan.action == "vision":
                 return TaskResult(task.id, False, "infer resolved to non-motion action")
             success = self._robot.execute_action(plan.to_command_dict())
             message = plan.response or plan.action if success else f"{plan.action} was rejected"
@@ -89,12 +106,9 @@ class FlashExecutor(BaseExecutor):
                 return TaskResult(task.id, bool(success), "rotated" if success else "rotation was rejected")
             # move: use vision context when available, else explicit params
             if self._llm is not None and context.get("vision") is not None:
-                motion = self._llm.plan_motion(context.get("goal", task.target), context["vision"])
-                if motion.action == "stop":
-                    return TaskResult(task.id, False, "cannot plan motion from vision")
-                success = self._robot.execute_action(motion.to_command_dict())
-                message = motion.response or "moved" if success else "motion was rejected"
-                return TaskResult(task.id, bool(success), message, data={"action": motion.to_command_dict()})
+                objects = context["vision"].get("objects", [])
+                target = task.target or (objects[0].get("name", "") if objects else "")
+                return self._run_approach(task, context, target)
             success = self._robot.move(
                 float(task.params.get("linear_x", 0.3)),
                 float(task.params.get("linear_y", 0.0)),

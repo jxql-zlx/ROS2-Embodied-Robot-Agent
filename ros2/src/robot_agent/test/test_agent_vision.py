@@ -110,21 +110,24 @@ class TestAgentApproachRouting(unittest.TestCase):
             self.agent.destroy_node()
 
     def test_approach_center_moves_forward(self):
-        vision = _FakeVisionTool(direction="center")
-        robot = _FakeRobotTool()
+        vision = _LoopVisionTool([
+            {"found": True, "observed_at": stamp, "objects": [
+                {"name": "cup", "confidence": 0.9, "direction": "center"}
+            ]} for stamp in (1, 2)
+        ])
+        robot = _LoopRobotTool(distances=[1.0, 0.6])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
         ok, response, action_json = self.agent.handle_task("帮我找杯子")
         self.assertTrue(ok)
-        self.assertEqual(vision.last_query, ("find", "cup"))
         self.assertEqual(robot.actions[0]["action"], "move")
-        self.assertIn("cup", response)
+        self.assertIn("停止距离", response)
 
     def test_approach_no_target_does_not_move(self):
         vision = _FakeVisionTool(found=False)
         robot = _FakeRobotTool()
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
         ok, response, action_json = self.agent.handle_task("帮我找杯子")
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         self.assertEqual(robot.actions, [])
         self.assertIn("没有发现目标", response)
 
@@ -145,7 +148,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(response, "执行层受理失败")
 
-    @patch("robot_agent.robot_agent_node.time.time", return_value=100.0)
+    @patch("robot_agent.approach.time.time", return_value=100.0)
     def test_approach_uses_new_frame_after_each_completed_motion(self, _clock):
         def scene(stamp, direction):
             return {

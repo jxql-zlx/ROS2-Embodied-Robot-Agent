@@ -27,6 +27,11 @@ class _StaleVision:
         return {"found": False, "objects": [], "stale": True}
 
 
+class _CenteredVision:
+    def find_object(self, _name):
+        return {"found": True, "objects": [{"name": "cup", "direction": "center"}]}
+
+
 class TestFlashExecutor(unittest.TestCase):
     def test_navigation_task_reports_final_success(self):
         robot = _Robot(nav_result=True)
@@ -59,6 +64,16 @@ class TestFlashExecutor(unittest.TestCase):
         )
         self.assertFalse(result.success)
         self.assertEqual(result.message, "vision result is stale")
+
+    def test_legacy_visual_move_cannot_bypass_feedback_requirements(self):
+        robot = _Robot()
+        result = FlashExecutor(robot, _CenteredVision(), MockLLM()).execute(
+            Task(id=1, tool="robot", action="move"),
+            {"goal": "find cup", "vision": {"objects": [{"name": "cup"}]}},
+        )
+        self.assertFalse(result.success)
+        self.assertFalse(result.data["recoverable"])
+        self.assertEqual(robot.calls, [])
 
 
 if __name__ == "__main__":

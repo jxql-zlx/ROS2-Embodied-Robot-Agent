@@ -16,6 +16,7 @@ def generate_launch_description() -> LaunchDescription:
 
     default_world = os.path.join(pkg_bringup, "worlds", "simple_world.world")
     default_llm_config = os.path.join(pkg_agent, "config", "llm.yaml")
+    default_agent_config = os.path.join(pkg_agent, "config", "agent.yaml")
 
     sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -43,6 +44,8 @@ def generate_launch_description() -> LaunchDescription:
             {
                 "llm_config": LaunchConfiguration("llm_config"),
                 "llm_provider": LaunchConfiguration("llm_provider"),
+                "mode": LaunchConfiguration("agent_mode"),
+                "agent_config": LaunchConfiguration("agent_config"),
             }
         ],
     )
@@ -55,6 +58,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("verbose", default_value="false"),
             DeclareLaunchArgument("llm_config", default_value=default_llm_config),
             DeclareLaunchArgument("llm_provider", default_value=""),
+            DeclareLaunchArgument("agent_mode", default_value="simple"),
+            DeclareLaunchArgument("agent_config", default_value=default_agent_config),
             sim,
             robot_control,
             robot_agent,

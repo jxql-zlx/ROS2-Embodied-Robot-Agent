@@ -103,11 +103,13 @@ python3 -m streamlit run web/app.py --server.port 8502
 
 - **视觉目标**：Gazebo 世界 `cup.world` 含一个 `model://cup` 贴图杯；
   运行视觉 demo 前脚本会自动设置 `GAZEBO_MODEL_PATH` / `GAZEBO_MODEL_DATABASE_URI`。
-- **接近完成判定（simple 模式）**：目标在图像中居中，且 `/scan` 前方 ±10° 的有效距离
+- **接近完成判定（simple / hierarchical 共用）**：目标在图像中居中，且 `/scan` 前方 ±10° 的有效距离
   达到 `approach_stop_distance`（默认距 `lidar_link` 0.65 米）时停止。每步动作最多 0.5 秒，
   动作结束后等待底盘稳定、三次一致激光读数和新视觉帧；无测距或读数异常时返回失败。
   此策略用于目标正前方无遮挡的 Demo，尚未将激光回波与具体物体做三维关联。
   Demo 脚本会重建相关包并检查服务成功、实际位移和最终测距。
+  用 `bash scripts/wsl_vision_action_demo.sh hierarchical "找到杯子然后移动过去"`
+  可验证分层规划、目标检测、闭环接近和停止判定。缺少反馈接口时接近任务会失败，且不触发通用旋转恢复。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

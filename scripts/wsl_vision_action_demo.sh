@@ -7,8 +7,14 @@ source /opt/ros/humble/setup.bash
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 ROS2_DIR="$REPO_ROOT/ros2"
+AGENT_MODE="${1:-simple}"
+TASK="${2:-找杯子}"
+case "$AGENT_MODE" in
+  simple|hierarchical) ;;
+  *) echo "usage: $0 [simple|hierarchical] [task]"; exit 1 ;;
+esac
 
-bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_tools robot_agent || exit 1
+bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_tools robot_agent robot_bringup || exit 1
 cd "$ROS2_DIR"
 source install/setup.bash
 source /usr/share/gazebo/setup.sh 2>/dev/null || true
@@ -17,12 +23,12 @@ set -uo pipefail
 MODELS="$ROS2_DIR/src/robot_bringup/models"
 WORLD="$ROS2_DIR/install/robot_bringup/share/robot_bringup/worlds/cup.world"
 MODEL="$REPO_ROOT/models/yolov8n.pt"
-LOG=/tmp/vision_action_demo.log
+LOG="/tmp/vision_action_demo_${AGENT_MODE}.log"
 
 export GAZEBO_MODEL_PATH="$MODELS:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI=""
 
-setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false > "$LOG" 2>&1 &
+setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false agent_mode:="$AGENT_MODE" > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
 setsid python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
@@ -52,8 +58,8 @@ echo ">> baseline pose"
 BASELINE=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo "$BASELINE"
 
-echo ">> sending task: 找杯子"
-TASK_OUTPUT=$(ros2 run robot_agent send_task "找杯子" --service --timeout 40 2>&1)
+echo ">> mode=$AGENT_MODE task=$TASK"
+TASK_OUTPUT=$(ros2 run robot_agent send_task "$TASK" --service --timeout 40 2>&1)
 TASK_RESULT=$?
 echo "$TASK_OUTPUT"
 if [ "$TASK_RESULT" -ne 0 ]; then
@@ -91,6 +97,10 @@ dist = math.hypot(f[0] - b[0], f[1] - b[1])
 print(f"displacement={dist:.3f} m (threshold=0.05)")
 action_line = next((line for line in sys.argv[3].splitlines() if line.startswith("action_json:")), "")
 data = json.loads(action_line.split(":", 1)[1]) if action_line else {}
+if isinstance(data, list):
+    approaches = [entry["data"]["approach"] for entry in data
+                  if entry.get("success") and "approach" in entry.get("data", {})]
+    data = approaches[-1] if approaches else {}
 distance = data.get("distance")
 if dist >= 0.05 and data.get("available") and isinstance(distance, (int, float)) and 0.4 <= distance <= 0.65:
     print(f"PASS: approach completed at measured standoff {distance:.3f} m")

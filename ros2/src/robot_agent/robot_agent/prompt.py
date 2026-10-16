@@ -57,7 +57,8 @@ PLAN_PROMPT = (
     "只输出一个 JSON 对象，不要输出其他文字。\n"
     "可用 tool：vision（视觉）、robot（运动）、nav（导航，暂未实现）。\n"
     "vision 可用 action：find_object（target=物体英文名）、observe。\n"
-    "robot 可用 action：move、rotate、stop。\n"
+    "robot 可用 action：move、rotate、stop、approach（target=物体英文名，闭环接近）。\n"
+    "找物并靠近应规划 find_object，然后 approach，approach 的 depends_on 包含 find_object 的 id。\n"
     "每个任务字段：id、tool、action、target、name、importance、urgency、complexity、"
     "dependency（0-100 优先级分数）和 depends_on（前置任务 id 数组）。\n"
     '输出格式：{"goal":"...","tasks":[{"id":1,"tool":"vision","action":"find_object",'

@@ -12,6 +12,17 @@ from robot_agent.planner.task_schema import Plan, Task
 class _FakeRobotTool:
     def __init__(self):
         self.actions = []
+        self.range_available = True
+
+    def status_stamp(self):
+        return (0, len(self.actions))
+
+    def wait_for_motion_complete(self, *_args):
+        return True
+
+    def get_sensor(self, _name):
+        moved = any(a.get("action") == "move" for a in self.actions)
+        return {"available": self.range_available, "distance": 0.6 if moved else 1.0}
 
     def execute_action(self, action):
         self.actions.append(action)
@@ -53,6 +64,15 @@ class _FakeVisionTool:
         self.last_query = ("scene", "")
         return {"found": self.found, "objects": []}
 
+    def wait_for_new_scene(self, _after, timeout_sec):
+        return self.find_object("cup")
+
+    def query_scene(self, scene, _name):
+        return scene
+
+    def get_scene(self):
+        return {"found": self.found, "objects": []}
+
 
 class _FixedPlanner(BasePlanner):
     def __init__(self):
@@ -79,9 +99,6 @@ class _FixedExecutor(BaseExecutor):
     def execute(self, task, context):
         return TaskResult(task.id, self.success, "done" if self.success else "failed")
 
-    def get_scene(self):
-        return {"found": self.found, "objects": []}
-
 
 class TestHierarchicalAgent(unittest.TestCase):
     def test_complex_find_then_move(self):
@@ -101,6 +118,22 @@ class TestHierarchicalAgent(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].success)
         self.assertEqual(robot.actions[0].get("action"), "stop")
+
+    def test_find_cup_alone_uses_closed_loop_approach(self):
+        robot = _FakeRobotTool()
+        agent = build_hierarchical_agent(robot_tool=robot, vision_tool=_FakeVisionTool())
+        results = agent.run("找杯子")
+        self.assertTrue(all(r.success for r in results))
+        self.assertEqual(results[-1].data["approach"]["distance"], 0.6)
+        self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
+
+    def test_range_failure_does_not_trigger_blind_search_rotation(self):
+        robot = _FakeRobotTool()
+        robot.range_available = False
+        agent = build_hierarchical_agent(robot_tool=robot, vision_tool=_FakeVisionTool())
+        results = agent.run("找到杯子然后移动过去")
+        self.assertTrue(any(not r.success for r in results))
+        self.assertEqual(robot.actions, [])
 
     def test_failure_recovery_replans_search(self):
         vision = _FakeVisionTool(found=False)

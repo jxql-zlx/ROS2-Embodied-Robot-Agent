@@ -221,7 +221,7 @@ class MockLLM(BaseLLM):
         tasks = []
         text = goal.lower()
         nid = 0
-        if any(w in text for w in ("找", "find", "search", "观察", "看到", "detect")):
+        if any(w in text for w in ("找", "find", "search", "观察", "看到", "detect", "靠近", "approach")):
             target = self._extract_vision_target(goal)
             nid += 1
             tasks.append(
@@ -237,14 +237,14 @@ class MockLLM(BaseLLM):
                     dependency=90,
                 )
             )
-        if any(w in text for w in ("移动", "过去", "靠近", "前进", "move", "approach", "go")):
+        if any(w in text for w in ("找", "find", "search", "移动", "过去", "靠近", "前进", "move", "approach", "go")):
             nid += 1
             tasks.append(
                 Task(
                     id=nid,
                     tool="robot",
-                    action="move",
-                    target="",
+                    action="approach" if tasks else "move",
+                    target=tasks[0].target if tasks else "",
                     name="move to target",
                     importance=85,
                     urgency=75,
