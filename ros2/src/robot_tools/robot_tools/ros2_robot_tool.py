@@ -7,10 +7,12 @@ reads /odom + /robot_status for pose/status feedback.
 from __future__ import annotations
 
 import math
+from threading import Event
 from typing import Any, Dict, Optional
 
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from action_msgs.msg import GoalStatus
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -111,6 +113,11 @@ class Ros2RobotTool(Node, BaseRobotTool):
         return self._publish("rotate", angular_z=angular_z, duration=duration)
 
     def navigate(self, goal: str, **kwargs: Any) -> bool:
+        """Navigate to a map pose and return whether Nav2 reached it.
+
+        ``timeout`` bounds the whole action (goal acceptance and execution).
+        Set ``wait=False`` only when the caller deliberately wants fire-and-forget.
+        """
         pose = self._parse_nav_goal(goal)
         if pose is None:
             return False
@@ -119,9 +126,54 @@ class Ros2RobotTool(Node, BaseRobotTool):
             return False
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = pose
-        future = self._nav_client.send_goal_async(goal_msg)
-        future.add_done_callback(self._on_nav_goal_response)
-        return True
+        wait = bool(kwargs.get("wait", True))
+        timeout = max(0.0, float(kwargs.get("timeout", 120.0)))
+        if not wait:
+            future = self._nav_client.send_goal_async(goal_msg)
+            future.add_done_callback(self._on_nav_goal_response)
+            return True
+
+        done = Event()
+        timed_out = Event()
+        outcome = {"success": False, "goal_handle": None}
+
+        def on_result(result_future) -> None:
+            try:
+                result = result_future.result()
+                outcome["success"] = result.status == GoalStatus.STATUS_SUCCEEDED
+                self.get_logger().info(f"Nav2 navigation result: status={result.status}")
+            except Exception as exc:
+                self.get_logger().error(f"Nav2 result failed: {exc}")
+            finally:
+                done.set()
+
+        def on_goal_response(goal_future) -> None:
+            try:
+                handle = goal_future.result()
+                if not handle.accepted:
+                    self.get_logger().warn("Nav2 goal rejected")
+                    done.set()
+                    return
+                outcome["goal_handle"] = handle
+                if timed_out.is_set():
+                    handle.cancel_goal_async()
+                    done.set()
+                    return
+                handle.get_result_async().add_done_callback(on_result)
+            except Exception as exc:
+                self.get_logger().error(f"Nav2 goal response failed: {exc}")
+                done.set()
+
+        goal_future = self._nav_client.send_goal_async(goal_msg)
+        goal_future.add_done_callback(on_goal_response)
+        if not done.wait(timeout):
+            timed_out.set()
+            handle = outcome["goal_handle"]
+            if handle is not None:
+                handle.cancel_goal_async()
+            self.get_logger().warn(f"Nav2 navigation timed out after {timeout:.1f}s")
+            return False
+        return bool(outcome["success"])
 
     def _parse_nav_goal(self, goal: str) -> Optional[PoseStamped]:
         parsed = parse_nav_goal_string(goal)
@@ -144,7 +196,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
         if not goal_handle.accepted:
             self.get_logger().warn("Nav2 goal rejected")
             return
-        self.get_logger().info("Nav2 goal accepted")
+        self.get_logger().info("Nav2 goal accepted (fire-and-forget)")
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_nav_result)
 

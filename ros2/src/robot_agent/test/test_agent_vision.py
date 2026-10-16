@@ -39,12 +39,13 @@ class _FakeVisionTool:
 
 
 class _FakeRobotTool:
-    def __init__(self):
+    def __init__(self, result=True):
         self.actions = []
+        self.result = result
 
     def execute_action(self, action):
         self.actions.append(action)
-        return True
+        return self.result
 
 
 class TestAgentApproachRouting(unittest.TestCase):
@@ -88,6 +89,13 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertEqual(vision.last_query, ("scene", ""))
         self.assertEqual(robot.actions, [])
         self.assertIn("未检测到", response)
+
+    def test_rejected_navigation_is_reported_as_failure(self):
+        robot = _FakeRobotTool(result=False)
+        self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_FakeVisionTool())
+        ok, response, _ = self.agent.handle_task("导航到 1.0,0.5")
+        self.assertFalse(ok)
+        self.assertEqual(response, "执行层受理失败")
 
 
 if __name__ == "__main__":

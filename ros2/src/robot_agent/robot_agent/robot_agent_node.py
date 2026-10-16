@@ -113,7 +113,10 @@ class RobotAgentNode(Node):
             ok = self._tool.execute_action(plan.to_command_dict())
             if ok:
                 self.get_logger().info(f"task='{task}' -> {action_json}")
-                response = plan.response or f"已执行动作：{plan.action}"
+                response = (
+                    "导航已到达目标点" if plan.action == "navigate"
+                    else plan.response or f"已执行动作：{plan.action}"
+                )
                 return True, response, action_json
             return False, "执行层受理失败", action_json
         except LLMError as exc:

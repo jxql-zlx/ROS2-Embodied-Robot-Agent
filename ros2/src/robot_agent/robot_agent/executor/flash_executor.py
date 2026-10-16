@@ -29,7 +29,13 @@ class FlashExecutor(BaseExecutor):
             if task.tool == "robot":
                 return self._run_robot(task, context)
             if task.tool == "nav":
-                return TaskResult(task.id, False, "nav tool not implemented yet")
+                if self._robot is None:
+                    return TaskResult(task.id, False, "robot tool unavailable")
+                if task.action != "navigate":
+                    return TaskResult(task.id, False, f"unknown nav action: {task.action}")
+                success = self._robot.navigate(task.target, timeout=task.params.get("timeout", 120.0))
+                message = "navigation completed" if success else "navigation failed"
+                return TaskResult(task.id, success, message)
             return TaskResult(task.id, False, f"unknown tool: {task.tool}")
         except Exception as exc:  # keep the loop alive on unexpected errors
             return TaskResult(task.id, False, f"executor error: {exc}")
@@ -57,32 +63,38 @@ class FlashExecutor(BaseExecutor):
             plan = self._llm.generate_action(task.target)
             if plan.action == "vision" or plan.action == "approach":
                 return TaskResult(task.id, False, "infer resolved to non-motion action")
-            self._robot.execute_action(plan.to_command_dict())
-            return TaskResult(task.id, True, plan.response or plan.action, data={"action": plan.to_command_dict()})
+            success = self._robot.execute_action(plan.to_command_dict())
+            message = plan.response or plan.action if success else f"{plan.action} was rejected"
+            return TaskResult(task.id, bool(success), message, data={"action": plan.to_command_dict()})
+
+        if task.action == "navigate":
+            success = self._robot.navigate(task.target, timeout=task.params.get("timeout", 120.0))
+            return TaskResult(task.id, bool(success), "navigation completed" if success else "navigation failed")
 
         if task.action in ("move", "rotate", "stop"):
             if task.action == "stop":
-                self._robot.stop()
-                return TaskResult(task.id, True, "stopped")
+                success = self._robot.stop()
+                return TaskResult(task.id, bool(success), "stopped" if success else "stop was rejected")
             if task.action == "rotate":
-                self._robot.rotate(
+                success = self._robot.rotate(
                     float(task.params.get("angular_z", 0.5)),
                     float(task.params.get("duration", 1.0)),
                 )
-                return TaskResult(task.id, True, "rotated")
+                return TaskResult(task.id, bool(success), "rotated" if success else "rotation was rejected")
             # move: use vision context when available, else explicit params
             if self._llm is not None and context.get("vision") is not None:
                 motion = self._llm.plan_motion(context.get("goal", task.target), context["vision"])
                 if motion.action == "stop":
                     return TaskResult(task.id, False, "cannot plan motion from vision")
-                self._robot.execute_action(motion.to_command_dict())
-                return TaskResult(task.id, True, motion.response or "moved", data={"action": motion.to_command_dict()})
-            self._robot.move(
+                success = self._robot.execute_action(motion.to_command_dict())
+                message = motion.response or "moved" if success else "motion was rejected"
+                return TaskResult(task.id, bool(success), message, data={"action": motion.to_command_dict()})
+            success = self._robot.move(
                 float(task.params.get("linear_x", 0.3)),
                 float(task.params.get("linear_y", 0.0)),
                 float(task.params.get("angular_z", 0.0)),
                 float(task.params.get("duration", 1.0)),
             )
-            return TaskResult(task.id, True, "moved")
+            return TaskResult(task.id, bool(success), "moved" if success else "move was rejected")
 
         return TaskResult(task.id, False, f"unknown robot action: {task.action}")
