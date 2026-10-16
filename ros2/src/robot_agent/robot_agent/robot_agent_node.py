@@ -174,27 +174,56 @@ class RobotAgentNode(Node):
     def _handle_approach(self, plan: ActionPlan, task: str) -> tuple[bool, str, str]:
         goal = (plan.goal or "").strip()
         try:
-            vision = (
+            find_target = lambda: (
                 self._vision_tool.find_object(goal)
-                if goal
-                else self._vision_tool.get_objects()
+                if goal else self._vision_tool.get_objects()
             )
+            vision = find_target()
+            if vision.get("stale"):
+                return False, "视觉结果已过期，请等待新画面。", json.dumps(vision, ensure_ascii=False)
             if not vision.get("found"):
                 response = f"没有发现目标 {goal}。" if goal else "当前场景未检测到任何物体。"
                 return True, response, json.dumps(vision, ensure_ascii=False)
 
-            motion = self._llm.plan_motion(task, vision)
-            action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
-            if motion.action == "stop":
-                response = f"找到 {goal}，但未执行运动。" if goal else "检测到目标，但未执行运动。"
-                return True, response, action_json
+            wait_for_scene = getattr(self._vision_tool, "wait_for_new_scene", None)
+            wait_for_motion = getattr(self._tool, "wait_for_motion_complete", None)
+            closed_loop = callable(wait_for_scene) and callable(wait_for_motion)
+            max_steps = 3 if closed_loop else 1
+            last_action_json = ""
 
-            ok = self._tool.execute_action(motion.to_command_dict())
-            if ok:
-                response = f"找到 {goal}。{motion.response}" if goal else motion.response
-                self.get_logger().info(f"approach '{task}' -> {action_json}")
-                return True, response, action_json
-            return False, "执行层受理失败", action_json
+            for step in range(max_steps):
+                motion = self._llm.plan_motion(task, vision)
+                last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
+                if motion.action == "stop":
+                    return False, "找到目标，但当前视觉信息无法安全规划接近动作。", last_action_json
+
+                status_stamp = self._tool.status_stamp() if closed_loop else None
+                if not self._tool.execute_action(motion.to_command_dict()):
+                    return False, "执行层未接受运动命令", last_action_json
+                self.get_logger().info(f"approach '{task}' step={step + 1} -> {last_action_json}")
+
+                if not closed_loop:
+                    response = f"找到 {goal}。{motion.response}" if goal else motion.response
+                    return True, response, last_action_json
+
+                duration = max(0.0, motion.duration)
+                if not wait_for_motion(status_stamp, max(3.0, duration + 2.0)):
+                    stop = getattr(self._tool, "stop", None)
+                    if callable(stop):
+                        stop()
+                    return False, "运动未能在时限内完成", last_action_json
+
+                observed_at = float(vision.get("observed_at", 0.0))
+                scene = wait_for_scene(observed_at, timeout_sec=5.0)
+                if scene is None:
+                    return False, "运动后未收到新视觉帧", last_action_json
+                vision = find_target()
+                if vision.get("stale"):
+                    return False, "运动后的视觉结果已过期", json.dumps(vision, ensure_ascii=False)
+                if not vision.get("found"):
+                    return False, f"运动后无法重新定位目标 {goal}", json.dumps(vision, ensure_ascii=False)
+
+            return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
         except LLMError as exc:
             self.get_logger().warn(f"approach LLM error for task '{task}': {exc}")
             return False, str(exc), ""

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from threading import Condition
 from typing import Any, Dict, Optional
 
 from rclpy.node import Node
@@ -26,14 +27,37 @@ class Ros2VisionTool(Node):
         self._detections_topic = detections_topic
         self._max_age_sec = max(0.0, float(max_age_sec))
         self._latest: Optional[Dict[str, Any]] = None
+        self._scene_condition = Condition()
         self._sub = self.create_subscription(String, detections_topic, self._on_scene, 10)
         self.get_logger().info(f"Ros2VisionTool ready: detections->{detections_topic}")
 
     def _on_scene(self, msg: String) -> None:
         try:
-            self._latest = json.loads(msg.data)
+            scene = json.loads(msg.data)
+            with self._scene_condition:
+                self._latest = scene
+                self._scene_condition.notify_all()
         except (json.JSONDecodeError, TypeError):
             self.get_logger().warn("ignoring malformed /vision/detections message")
+
+    def wait_for_new_scene(
+        self, after_observed_at: float, timeout_sec: float = 5.0
+    ) -> Optional[Dict[str, Any]]:
+        """Wait for a scene produced from a newer camera frame."""
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._scene_condition:
+            while True:
+                scene = self._latest
+                try:
+                    observed_at = float((scene or {}).get("observed_at", 0.0))
+                except (TypeError, ValueError):
+                    observed_at = 0.0
+                if observed_at > after_observed_at:
+                    return dict(scene)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._scene_condition.wait(remaining)
 
     def get_scene(self) -> Optional[Dict[str, Any]]:
         """Return the latest raw Scene dict (or None before the first message)."""
@@ -64,7 +88,11 @@ class Ros2VisionTool(Node):
                 "age_sec": round(age, 3) if age is not None else None,
             }
         result = self._find(self._latest, object_name, min_confidence)
-        result.update({"stale": False, "age_sec": round(age, 3)})
+        result.update({
+            "stale": False,
+            "age_sec": round(age, 3),
+            "observed_at": float(self._latest["observed_at"]),
+        })
         return result
 
     @staticmethod

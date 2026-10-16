@@ -7,7 +7,8 @@ reads /odom + /robot_status for pose/status feedback.
 from __future__ import annotations
 
 import math
-from threading import Event
+import time
+from threading import Condition, Event
 from typing import Any, Dict, Optional
 
 from geometry_msgs.msg import PoseStamped
@@ -58,6 +59,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self._nav_client = ActionClient(self, NavigateToPose, navigate_server)
         self._latest_pose: Optional[Dict[str, float]] = None
         self._latest_status: Optional[RobotStatus] = None
+        self._status_condition = Condition()
         self.get_logger().info(
             f"Ros2RobotTool ready: cmd->{command_topic}, odom->{odom_topic}, "
             f"status->{status_topic}, nav->{navigate_server}"
@@ -79,7 +81,38 @@ class Ros2RobotTool(Node, BaseRobotTool):
         }
 
     def _on_status(self, msg: RobotStatus) -> None:
-        self._latest_status = msg
+        with self._status_condition:
+            self._latest_status = msg
+            self._status_condition.notify_all()
+
+    def status_stamp(self) -> Optional[tuple[int, int]]:
+        """Return a snapshot token for waiting on a later motion status."""
+        with self._status_condition:
+            stamp = self._latest_status.stamp if self._latest_status else None
+            return (stamp.sec, stamp.nanosec) if stamp is not None else None
+
+    def wait_for_motion_complete(
+        self,
+        after_stamp: Optional[tuple[int, int]],
+        timeout_sec: float,
+    ) -> bool:
+        """Wait for a move/rotate command to report a terminal status."""
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._status_condition:
+            while True:
+                status = self._latest_status
+                if status is not None:
+                    stamp = (status.stamp.sec, status.stamp.nanosec)
+                    is_new = after_stamp is None or stamp > after_stamp
+                    if is_new and status.action in ("move", "rotate"):
+                        if status.state == "error":
+                            return False
+                        if status.state in ("done", "stopped"):
+                            return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._status_condition.wait(remaining)
 
     def _publish(self, action: str, **fields: Any) -> bool:
         msg = RobotCommand()
