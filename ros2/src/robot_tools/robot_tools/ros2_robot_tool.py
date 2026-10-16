@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from threading import Condition, Event
+from threading import Condition, Event, Lock
 from typing import Any, Dict, Optional
 
 from geometry_msgs.msg import PoseStamped
@@ -228,26 +228,94 @@ class Ros2RobotTool(Node, BaseRobotTool):
         timeout = max(0.0, float(kwargs.get("timeout", 120.0)))
         cancel_event = kwargs.get("cancel_event")
         command_guard = kwargs.get("command_guard")
+        cancel_timeout = max(0.1, float(kwargs.get("cancel_timeout", 5.0)))
+        navigation_state_callback = kwargs.get("navigation_state_callback")
+
+        def set_navigation_active(active: bool) -> None:
+            if navigation_state_callback is not None:
+                navigation_state_callback(active)
 
         def cancelled() -> bool:
             return cancel_event is not None and cancel_event.is_set()
 
         if cancelled():
             return False
-        if command_guard is None:
-            goal_future = self._nav_client.send_goal_async(goal_msg)
-        else:
-            with command_guard:
+        set_navigation_active(True)
+        try:
+            if command_guard is None:
                 if cancelled():
+                    set_navigation_active(False)
                     return False
                 goal_future = self._nav_client.send_goal_async(goal_msg)
+            else:
+                with command_guard:
+                    if cancelled():
+                        goal_future = None
+                    else:
+                        goal_future = self._nav_client.send_goal_async(goal_msg)
+                if goal_future is None:
+                    set_navigation_active(False)
+                    return False
+        except Exception as exc:
+            set_navigation_active(False)
+            self.get_logger().error(f"Nav2 goal submission failed: {exc}")
+            return False
+
         if not wait:
-            goal_future.add_done_callback(self._on_nav_goal_response)
+            def on_fire_and_forget_response(future) -> None:
+                try:
+                    handle = future.result()
+                    if handle is None or not handle.accepted:
+                        set_navigation_active(False)
+                        self.get_logger().warn("Nav2 goal rejected")
+                        return
+                    result_future = handle.get_result_async()
+
+                    def on_fire_and_forget_result(done_future) -> None:
+                        set_navigation_active(False)
+                        self._on_nav_result(done_future)
+
+                    result_future.add_done_callback(on_fire_and_forget_result)
+                except Exception as exc:
+                    set_navigation_active(False)
+                    self.get_logger().error(f"Nav2 goal response failed: {exc}")
+
+            goal_future.add_done_callback(on_fire_and_forget_response)
             return True
 
-        done = Event()
+        goal_response_done = Event()
+        result_done = Event()
         timed_out = Event()
-        outcome = {"success": False, "goal_handle": None}
+        state_lock = Lock()
+        outcome = {
+            "success": False,
+            "goal_handle": None,
+            "accepted": None,
+            "cancel_sent": False,
+            "cancel_future": None,
+        }
+
+        def request_cancel(handle) -> None:
+            with state_lock:
+                if outcome["cancel_sent"]:
+                    return
+                outcome["cancel_sent"] = True
+            try:
+                cancel_future = handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().error(f"Nav2 cancel request failed: {exc}")
+                return
+            with state_lock:
+                outcome["cancel_future"] = cancel_future
+
+            def on_cancel_response(future) -> None:
+                try:
+                    future.result()
+                    self.get_logger().info("Nav2 cancel response received")
+                except Exception as exc:
+                    self.get_logger().error(f"Nav2 cancel response failed: {exc}")
+
+            cancel_future.add_done_callback(on_cancel_response)
 
         def on_result(result_future) -> None:
             try:
@@ -257,46 +325,61 @@ class Ros2RobotTool(Node, BaseRobotTool):
             except Exception as exc:
                 self.get_logger().error(f"Nav2 result failed: {exc}")
             finally:
-                done.set()
+                set_navigation_active(False)
+                result_done.set()
 
         def on_goal_response(goal_future) -> None:
             try:
                 handle = goal_future.result()
+                with state_lock:
+                    outcome["accepted"] = bool(handle is not None and handle.accepted)
+                    outcome["goal_handle"] = handle
+                goal_response_done.set()
+                if handle is None:
+                    set_navigation_active(False)
+                    self.get_logger().error("Nav2 goal response was empty")
+                    result_done.set()
+                    return
                 if not handle.accepted:
                     self.get_logger().warn("Nav2 goal rejected")
-                    done.set()
+                    set_navigation_active(False)
+                    result_done.set()
                     return
-                outcome["goal_handle"] = handle
                 if timed_out.is_set():
-                    handle.cancel_goal_async()
-                    done.set()
-                    return
+                    request_cancel(handle)
                 handle.get_result_async().add_done_callback(on_result)
             except Exception as exc:
                 self.get_logger().error(f"Nav2 goal response failed: {exc}")
-                done.set()
+                goal_response_done.set()
+                set_navigation_active(False)
+                result_done.set()
 
         goal_future.add_done_callback(on_goal_response)
         deadline = time.monotonic() + timeout
-        while not done.is_set():
-            if cancelled():
+        cancel_deadline = None
+        while not result_done.is_set():
+            now = time.monotonic()
+            if cancel_deadline is None and (cancelled() or now >= deadline):
                 timed_out.set()
-                handle = outcome["goal_handle"]
+                cancel_deadline = now + cancel_timeout
+                with state_lock:
+                    handle = outcome["goal_handle"]
                 if handle is not None:
-                    handle.cancel_goal_async()
+                    request_cancel(handle)
+                reason = "cancelled" if cancelled() else f"timed out after {timeout:.1f}s"
+                self.get_logger().warn(f"Nav2 navigation {reason}; waiting for terminal result")
+            if cancel_deadline is not None and now >= cancel_deadline and not result_done.is_set():
+                self.get_logger().error(
+                    "Nav2 cancellation is unconfirmed; keeping navigation ownership locked"
+                )
                 return False
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if goal_response_done.is_set() and outcome["accepted"] is False:
                 break
-            done.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
-        if not done.is_set():
-            timed_out.set()
-            handle = outcome["goal_handle"]
-            if handle is not None:
-                handle.cancel_goal_async()
-            self.get_logger().warn(f"Nav2 navigation timed out after {timeout:.1f}s")
+            result_done.wait(0.05 if cancel_event is not None or cancel_deadline is not None else
+                             max(0.01, min(0.1, deadline - now)))
+        if not result_done.is_set():
             return False
-        return bool(outcome["success"])
+        return bool(outcome["success"] and not cancelled() and cancel_deadline is None)
 
     def _parse_nav_goal(self, goal: str) -> Optional[PoseStamped]:
         parsed = parse_nav_goal_string(goal)
