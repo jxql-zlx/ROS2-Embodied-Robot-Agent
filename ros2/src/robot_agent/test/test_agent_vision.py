@@ -151,6 +151,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertEqual(robot.wait_count, 3)
         self.assertEqual(robot.actions[0]["action"], "rotate")
         self.assertEqual(robot.actions[1]["action"], "move")
+        self.assertLessEqual(robot.actions[1]["duration"], 0.5)
 
     def test_approach_stops_when_no_new_frame_arrives(self):
         vision = _LoopVisionTool([

@@ -25,6 +25,8 @@ from robot_agent.vision_response import format_vision_result
 from robot_tools.ros2_robot_tool import Ros2RobotTool
 from robot_tools.ros2_vision_tool import Ros2VisionTool
 
+APPROACH_MAX_STEP_DURATION_SEC = 0.5
+
 
 class RobotAgentNode(Node):
     def __init__(
@@ -196,6 +198,12 @@ class RobotAgentNode(Node):
                 last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
                 if motion.action == "stop":
                     return False, "找到目标，但当前视觉信息无法安全规划接近动作。", last_action_json
+
+                motion.duration = min(
+                    max(0.0, motion.duration) or APPROACH_MAX_STEP_DURATION_SEC,
+                    APPROACH_MAX_STEP_DURATION_SEC,
+                )
+                last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
 
                 status_stamp = self._tool.status_stamp() if closed_loop else None
                 if not self._tool.execute_action(motion.to_command_dict()):
