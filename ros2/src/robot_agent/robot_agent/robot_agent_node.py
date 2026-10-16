@@ -74,6 +74,7 @@ class RobotAgentNode(Node):
         self._active_cancel_event: Optional[threading.Event] = None
         self._active_task_done: Optional[threading.Event] = None
         self._navigation_unresolved = False
+        self._cancellation_pending = False
         self._task_callback_group = ReentrantCallbackGroup()
         self._cancel_callback_group = ReentrantCallbackGroup()
 
@@ -137,6 +138,10 @@ class RobotAgentNode(Node):
                 task_done = self._active_task_done
                 navigation_unresolved = self._navigation_unresolved
                 navigation_was_unresolved = navigation_unresolved
+                if navigation_unresolved:
+                    # The terminal callback may arrive after the task thread
+                    # exits, so keep admission closed through final stop.
+                    self._cancellation_pending = True
                 if event is not None:
                     event.set()
                 stopped = bool(self._tool.stop())
@@ -164,6 +169,14 @@ class RobotAgentNode(Node):
                 return False, "Nav2 尚未确认取消；新任务暂不可执行", ""
             if not self._tool.stop():
                 return False, "Nav2 已结束，但最终停止指令发送失败", ""
+            with self._task_guard:
+                self._cancellation_pending = False
+        elif self._cancellation_pending:
+            # A previous navigation cancellation may have reached its terminal
+            # state after timing out. A fresh confirmed stop completes its lease.
+            with self._task_guard:
+                if not self._navigation_unresolved:
+                    self._cancellation_pending = False
         response = "导航已取消并确认停止" if navigation_was_unresolved else (
             "任务已取消并已发送停止" if event is not None else "已发送停止，当前没有运行任务"
         )
@@ -191,6 +204,15 @@ class RobotAgentNode(Node):
     def _set_navigation_unresolved(self, active: bool) -> None:
         with self._task_guard:
             self._navigation_unresolved = bool(active)
+            if (not active and self._cancellation_pending and
+                    self._active_cancel_event is None):
+                try:
+                    stopped = bool(self._tool.stop())
+                except Exception as exc:
+                    self.get_logger().error(f"final stop after late Nav2 result failed: {exc}")
+                    stopped = False
+                if stopped:
+                    self._cancellation_pending = False
 
     def handle_task(self, task: str) -> tuple[bool, str, str]:
         """Run one NL task. Returns (success, response, action_json)."""
@@ -199,7 +221,8 @@ class RobotAgentNode(Node):
         event = threading.Event()
         task_done = threading.Event()
         with self._task_guard:
-            if self._active_cancel_event is not None or self._navigation_unresolved:
+            if (self._active_cancel_event is not None or self._navigation_unresolved or
+                    self._cancellation_pending):
                 return False, "已有任务正在执行", ""
             self._active_cancel_event = event
             self._active_task_done = task_done

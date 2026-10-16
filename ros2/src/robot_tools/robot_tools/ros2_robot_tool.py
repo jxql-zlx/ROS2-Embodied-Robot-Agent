@@ -318,26 +318,38 @@ class Ros2RobotTool(Node, BaseRobotTool):
             cancel_future.add_done_callback(on_cancel_response)
 
         def on_result(result_future) -> None:
+            terminal = False
             try:
                 result = result_future.result()
-                outcome["success"] = result.status == GoalStatus.STATUS_SUCCEEDED
-                self.get_logger().info(f"Nav2 navigation result: status={result.status}")
+                status = result.status
+                terminal = status in (
+                    GoalStatus.STATUS_SUCCEEDED,
+                    GoalStatus.STATUS_CANCELED,
+                    GoalStatus.STATUS_ABORTED,
+                )
+                outcome["success"] = status == GoalStatus.STATUS_SUCCEEDED
+                if terminal:
+                    self.get_logger().info(f"Nav2 navigation result: status={status}")
+                else:
+                    self.get_logger().error(f"Nav2 returned non-terminal result status={status}")
             except Exception as exc:
                 self.get_logger().error(f"Nav2 result failed: {exc}")
             finally:
-                set_navigation_active(False)
+                if terminal:
+                    set_navigation_active(False)
                 result_done.set()
 
         def on_goal_response(goal_future) -> None:
             try:
                 handle = goal_future.result()
                 with state_lock:
-                    outcome["accepted"] = bool(handle is not None and handle.accepted)
+                    outcome["accepted"] = None if handle is None else bool(handle.accepted)
                     outcome["goal_handle"] = handle
                 goal_response_done.set()
                 if handle is None:
-                    set_navigation_active(False)
-                    self.get_logger().error("Nav2 goal response was empty")
+                    self.get_logger().error(
+                        "Nav2 goal response was empty; keeping navigation ownership locked"
+                    )
                     result_done.set()
                     return
                 if not handle.accepted:
@@ -351,7 +363,6 @@ class Ros2RobotTool(Node, BaseRobotTool):
             except Exception as exc:
                 self.get_logger().error(f"Nav2 goal response failed: {exc}")
                 goal_response_done.set()
-                set_navigation_active(False)
                 result_done.set()
 
         goal_future.add_done_callback(on_goal_response)

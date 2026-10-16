@@ -16,6 +16,8 @@ class _Future:
         self.callbacks = []
 
     def result(self):
+        if isinstance(self.value, BaseException):
+            raise self.value
         return self.value
 
     def add_done_callback(self, callback):
@@ -182,6 +184,36 @@ class TestNavigationResult(unittest.TestCase):
     def test_rejected_goal_returns_false(self, *_mocks):
         tool = self._tool(_GoalHandle(accepted=False))
         self.assertFalse(tool.navigate("1,2", timeout=0.1))
+
+    @patch("robot_tools.ros2_robot_tool.NavigateToPose")
+    @patch.object(Ros2RobotTool, "_parse_nav_goal", return_value=object())
+    @patch.object(Ros2RobotTool, "get_logger", return_value=SimpleNamespace(
+        warn=lambda *_: None, info=lambda *_: None, error=lambda *_: None
+    ))
+    def test_result_exception_keeps_navigation_ownership_locked(self, *_mocks):
+        handle = _GoalHandle(complete_result=False)
+        tool = self._tool(handle)
+        states = []
+        handle.result_future.complete(RuntimeError("lost result"))
+
+        self.assertFalse(tool.navigate(
+            "1,2", timeout=0.1, navigation_state_callback=states.append,
+        ))
+        self.assertEqual(states, [True])
+
+    @patch("robot_tools.ros2_robot_tool.NavigateToPose")
+    @patch.object(Ros2RobotTool, "_parse_nav_goal", return_value=object())
+    @patch.object(Ros2RobotTool, "get_logger", return_value=SimpleNamespace(
+        warn=lambda *_: None, info=lambda *_: None, error=lambda *_: None
+    ))
+    def test_goal_response_exception_keeps_navigation_ownership_locked(self, *_mocks):
+        tool = self._tool(RuntimeError("lost goal response"))
+        states = []
+
+        self.assertFalse(tool.navigate(
+            "1,2", timeout=0.1, navigation_state_callback=states.append,
+        ))
+        self.assertEqual(states, [True])
 
 
 if __name__ == "__main__":

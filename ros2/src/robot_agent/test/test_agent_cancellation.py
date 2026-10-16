@@ -139,6 +139,76 @@ class TestAgentCancellation(unittest.TestCase):
         response = self.agent.handle_task("前进")
         self.assertTrue(response[0])
 
+    def test_late_navigation_terminal_result_sends_final_stop_before_reopening(self):
+        self.agent._set_navigation_unresolved(True)
+
+        cancel_result = self.agent._cancel_active_task()
+        self.assertFalse(cancel_result[0])
+        self.assertIn("尚未确认取消", cancel_result[1])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertEqual(self.robot.actions, [{"action": "stop"}])
+
+        # A late Nav2 terminal callback must close the cancellation lease with
+        # a final stop before it clears the admission gate.
+        self.agent._set_navigation_unresolved(False)
+        self.assertFalse(self.agent._cancellation_pending)
+        self.assertEqual(self.robot.actions, [{"action": "stop"}, {"action": "stop"}])
+        self.agent._run_task = lambda *_args: (True, "done", "")
+        self.assertTrue(self.agent.handle_task("follow-up")[0])
+
+    def test_navigation_final_stop_keeps_task_admission_closed(self):
+        navigation_entered = threading.Event()
+        final_stop_entered = threading.Event()
+        release_final_stop = threading.Event()
+        original_stop = self.robot.stop
+        stop_calls = 0
+
+        def stop_with_final_barrier():
+            nonlocal stop_calls
+            stop_calls += 1
+            if stop_calls == 2:
+                final_stop_entered.set()
+                self.assertTrue(release_final_stop.wait(2.0))
+            return original_stop()
+
+        self.robot.stop = stop_with_final_barrier
+
+        def run_navigation(_task, cancel_event):
+            self.agent._set_navigation_unresolved(True)
+            navigation_entered.set()
+            self.assertTrue(cancel_event.wait(2.0))
+            self.agent._set_navigation_unresolved(False)
+            return False, "cancelled", ""
+
+        self.agent._run_task = run_navigation
+        active_result = []
+        cancel_result = []
+        active_thread = threading.Thread(
+            target=lambda: active_result.append(self.agent.handle_task("navigate")),
+        )
+        active_thread.start()
+        self.assertTrue(navigation_entered.wait(1.0))
+
+        cancel_thread = threading.Thread(
+            target=lambda: cancel_result.append(self.agent._cancel_active_task()),
+        )
+        cancel_thread.start()
+        self.assertTrue(final_stop_entered.wait(2.0), "final stop was not reached")
+
+        # The old navigation is terminal, but cancellation still owes its final
+        # stop. A new task must not acquire command ownership in this interval.
+        admission_result = self.agent.handle_task("follow-up")
+        self.assertFalse(admission_result[0])
+        self.assertIn("已有任务", admission_result[1])
+
+        release_final_stop.set()
+        active_thread.join(2.0)
+        cancel_thread.join(2.0)
+        self.assertFalse(active_thread.is_alive())
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertFalse(active_result[0][0])
+        self.assertTrue(cancel_result[0][0])
+
     def test_hierarchical_navigation_uses_cancellable_navigation_dispatch(self):
         event = threading.Event()
         self.robot.navigate = lambda *_args, **_kwargs: False
