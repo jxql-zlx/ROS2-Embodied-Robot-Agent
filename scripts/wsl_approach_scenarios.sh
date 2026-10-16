@@ -2,7 +2,7 @@
 # Run Gazebo scenario regressions for both agent modes, building once.
 source /opt/ros/humble/setup.bash
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_description robot_tools robot_agent robot_bringup || exit 1
+bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_interfaces robot_description robot_tools robot_agent robot_bringup || exit 1
 set -euo pipefail
 if [ "$#" -eq 0 ]; then set -- simple hierarchical; fi
 scenario_names="${APPROACH_SCENARIOS:-left right near far blocked absent vision_dropout range_dropout}"

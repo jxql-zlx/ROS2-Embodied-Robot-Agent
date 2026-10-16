@@ -15,12 +15,12 @@ case "$AGENT_MODE" in
   *) echo "usage: $0 [simple|hierarchical] [task] [scenario]"; exit 1 ;;
 esac
 case "$SCENARIO" in
-  center|left|right|near|far|blocked|absent|vision_dropout|range_dropout) ;;
+  center|left|right|near|far|blocked|absent|vision_dropout|range_dropout|cancel) ;;
   *) echo "unknown scenario: $SCENARIO"; exit 1 ;;
 esac
 
 if [ "${APPROACH_SKIP_BUILD:-0}" != 1 ]; then
-  bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_description robot_tools robot_agent robot_bringup || exit 1
+  bash "$SCRIPTS_DIR/wsl_build.sh" --packages-select robot_interfaces robot_description robot_tools robot_agent robot_bringup || exit 1
 fi
 cd "$ROS2_DIR"
 source install/setup.bash
@@ -103,7 +103,11 @@ BASELINE=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo "$BASELINE"
 
 echo ">> mode=$AGENT_MODE scenario=$SCENARIO task=$TASK"
-TASK_OUTPUT=$(ros2 run robot_agent send_task "$TASK" --service --timeout 40 2>&1)
+if [ "$SCENARIO" = cancel ]; then
+  TASK_OUTPUT=$(python3 "$SCRIPTS_DIR/cancel_task_scenario.py" "$TASK" 2>&1)
+else
+  TASK_OUTPUT=$(ros2 run robot_agent send_task "$TASK" --service --timeout 40 2>&1)
+fi
 TASK_RESULT=$?
 echo "$TASK_OUTPUT"
 EXPECTED_RESULT=0
@@ -151,6 +155,11 @@ yaw_change = math.atan2(math.sin(final_yaw - post_yaw), math.cos(final_yaw - pos
 if abs(yaw_change) > 0.03:
     raise SystemExit("FAIL: robot kept rotating after task completion")
 scenario = sys.argv[4]
+if scenario == "cancel":
+    if "PASS: cancellation" not in sys.argv[3]:
+        raise SystemExit("FAIL: cancellation check did not report success")
+    print("PASS: cancellation stopped the active task")
+    raise SystemExit(0)
 if scenario in ("absent", "blocked", "vision_dropout", "range_dropout"):
     limit = 0.02 if scenario in ("absent", "blocked") else 0.25
     reasons = {"absent": ("没有发现", "no target found"),

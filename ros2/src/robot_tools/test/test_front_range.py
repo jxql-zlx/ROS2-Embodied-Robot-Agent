@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from threading import Condition, Event
 from unittest.mock import MagicMock, patch
 
 from sensor_msgs.msg import LaserScan
@@ -73,6 +74,16 @@ class TestFrontRange(unittest.TestCase):
         tool._scan_condition.wait.side_effect = receive_scans
         result = tool.wait_for_front_range()
         self.assertEqual(result["distance"], 0.81)
+
+    def test_cancelled_wait_returns_without_scans(self):
+        tool = object.__new__(Ros2RobotTool)
+        tool._scan_condition = Condition()
+        tool._scan_history = []
+        cancel_event = Event()
+        cancel_event.set()
+        result = tool.wait_for_front_range(timeout_sec=10.0, cancel_event=cancel_event)
+        self.assertFalse(result["available"])
+        self.assertTrue(result["cancelled"])
 
 
 if __name__ == "__main__":

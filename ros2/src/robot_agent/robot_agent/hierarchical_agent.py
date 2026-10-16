@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List
 
 from robot_agent.executor.base_executor import BaseExecutor, TaskResult
@@ -50,19 +51,40 @@ class HierarchicalAgent:
         self._max_steps = max_steps
         self._max_recoveries = max(0, max_recoveries)
 
-    def run(self, goal: str) -> List[TaskResult]:
+    def run(
+        self, goal: str, context: Dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> List[TaskResult]:
+        context = dict(context or {})
+        if cancel_event is not None:
+            context["_cancel_event"] = cancel_event
+        results: List[TaskResult] = []
+
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        def cancellation_result() -> List[TaskResult]:
+            return [*results, TaskResult(-1, False, "任务已取消", {"cancelled": True})]
+
+        if cancelled():
+            return cancellation_result()
         if is_simple(goal):
             task = Task(id=0, tool="robot", action="infer", target=goal, name=goal)
-            return [self._executor.execute(task, {"goal": goal})]
+            context["goal"] = goal
+            result = self._executor.execute(task, context)
+            return cancellation_result() if cancelled() else [result]
 
         plan = self._planner.plan(goal)
+        if cancelled():
+            return cancellation_result()
         self._task_manager.add_plan(plan)
-        results: List[TaskResult] = []
-        context = {"goal": goal}
+        context["goal"] = goal
         recoveries = 0
         steps_taken = 0
 
         for _ in range(self._max_steps):
+            if cancelled():
+                return cancellation_result()
             task = self._task_manager.next_task()
             if task is None:
                 break
@@ -70,6 +92,9 @@ class HierarchicalAgent:
             result = self._executor.execute(task, context)
             steps_taken += 1
             results.append(result)
+            if cancelled():
+                self._task_manager.mark_failed(task.id)
+                return cancellation_result()
             if result.success:
                 self._task_manager.mark_completed(task.id)
                 context.update(result.data or {})

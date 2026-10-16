@@ -43,12 +43,14 @@ class Ros2VisionTool(Node):
             self.get_logger().warn("ignoring malformed /vision/detections message")
 
     def wait_for_new_scene(
-        self, after_observed_at: float, timeout_sec: float = 5.0
+        self, after_observed_at: float, timeout_sec: float = 5.0, cancel_event=None
     ) -> Optional[Dict[str, Any]]:
         """Wait for a scene produced from a newer camera frame."""
         deadline = time.monotonic() + max(0.0, timeout_sec)
         with self._scene_condition:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
                 scene = self._latest
                 try:
                     observed_at = float((scene or {}).get("observed_at", 0.0))
@@ -59,7 +61,7 @@ class Ros2VisionTool(Node):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-                self._scene_condition.wait(remaining)
+                self._scene_condition.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
 
     def get_scene(self) -> Optional[Dict[str, Any]]:
         """Return the latest raw Scene dict (or None before the first message)."""

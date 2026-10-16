@@ -1,6 +1,7 @@
 """Integration tests for the HierarchicalAgent (Pro -> Manager -> Flash)."""
 
 import unittest
+import threading
 
 from robot_agent.hierarchical_agent import build_hierarchical_agent
 from robot_agent.executor.base_executor import BaseExecutor, TaskResult
@@ -100,7 +101,30 @@ class _FixedExecutor(BaseExecutor):
         return TaskResult(task.id, self.success, "done" if self.success else "failed")
 
 
+class _CancelDuringTaskExecutor(BaseExecutor):
+    def __init__(self, cancel_event):
+        self.cancel_event = cancel_event
+        self.calls = []
+
+    def execute(self, task, context):
+        self.calls.append(task.id)
+        self.cancel_event.set()
+        return TaskResult(task.id, False, "interrupted")
+
+
 class TestHierarchicalAgent(unittest.TestCase):
+    def test_cancelled_task_does_not_replan_or_start_dependent_tasks(self):
+        cancel_event = threading.Event()
+        planner = _FixedPlanner()
+        executor = _CancelDuringTaskExecutor(cancel_event)
+        agent = HierarchicalAgent(planner, executor)
+
+        results = agent.run("查找目标然后移动", cancel_event=cancel_event)
+
+        self.assertEqual(executor.calls, [1])
+        self.assertEqual(planner.replan_calls, 0)
+        self.assertTrue(results[-1].data["cancelled"])
+
     def test_complex_find_then_move(self):
         vision = _FakeVisionTool(found=True, direction="center")
         robot = _FakeRobotTool()

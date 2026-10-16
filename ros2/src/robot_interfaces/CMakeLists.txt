@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotStatus.msg"
   "srv/ExecuteCommand.srv"
   "srv/TaskExecute.srv"
+  "srv/CancelTask.srv"
   DEPENDENCIES builtin_interfaces
 )
 

@@ -12,16 +12,28 @@ APPROACH_MAX_STEP_DURATION_SEC = 0.5
 
 
 class ApproachController:
-    def __init__(self, robot, vision, llm, stop_distance=0.65, logger=None, max_steps=8):
+    def __init__(
+        self, robot, vision, llm, stop_distance=0.65, logger=None, max_steps=8,
+        cancel_event=None, execute_action=None,
+    ):
         self._robot = robot
         self._vision = vision
         self._llm = llm
         self._stop_distance = float(stop_distance)
         self._logger = logger if logger is not None else logging.getLogger(__name__)
         self._max_steps = max(1, min(int(max_steps), 20))
+        self._cancel_event = cancel_event
+        self._execute_action = execute_action
+
+    def _cancelled(self) -> bool:
+        return self._cancel_event is not None and self._cancel_event.is_set()
 
     def run(self, goal: str, task: str) -> tuple[bool, str, str]:
+        if self._cancelled():
+            return False, "任务已取消", ""
         result = self._run(goal, task)
+        if self._cancelled():
+            return False, "任务已取消", result[2]
         if not result[0]:
             stop = getattr(self._robot, "stop", None)
             if callable(stop):
@@ -34,11 +46,15 @@ class ApproachController:
     def _run(self, goal: str, task: str) -> tuple[bool, str, str]:
         goal = (goal or "").strip()
         try:
+            if self._cancelled():
+                return False, "任务已取消", ""
             find_target = lambda: (
                 self._vision.find_object(goal)
                 if goal else self._vision.get_objects()
             )
             vision = find_target()
+            if self._cancelled():
+                return False, "任务已取消", ""
             if vision.get("stale"):
                 return False, "视觉结果已过期，请等待新画面。", json.dumps(vision, ensure_ascii=False)
             if not vision.get("found"):
@@ -57,6 +73,8 @@ class ApproachController:
             clearance = None
 
             for step in range(max_steps + 1):
+                if self._cancelled():
+                    return False, "任务已取消", last_action_json
                 get_sensor = getattr(self._robot, "get_sensor", None)
                 if closed_loop and callable(get_sensor):
                     # Visual re-observation can take seconds. Recheck range
@@ -91,16 +109,33 @@ class ApproachController:
                 last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
 
                 status_stamp = self._robot.status_stamp()
-                if not self._robot.execute_action(motion.to_command_dict()):
+                if self._cancelled():
+                    return False, "任务已取消", last_action_json
+                dispatch = self._execute_action or self._robot.execute_action
+                if not dispatch(motion.to_command_dict()):
                     return False, "执行层未接受运动命令", last_action_json
                 self._logger.info(f"approach '{task}' step={step + 1} -> {last_action_json}")
 
                 duration = max(0.0, motion.duration)
-                if not wait_for_motion(status_stamp, max(3.0, duration + 2.0)):
+                if self._cancel_event is None:
+                    motion_done = wait_for_motion(status_stamp, max(3.0, duration + 2.0))
+                else:
+                    motion_done = wait_for_motion(
+                        status_stamp, max(3.0, duration + 2.0), cancel_event=self._cancel_event
+                    )
+                if not motion_done:
+                    if self._cancelled():
+                        return False, "任务已取消", last_action_json
                     return False, "运动未能在时限内完成", last_action_json
 
                 wait_for_range = getattr(self._robot, "wait_for_front_range", None)
-                clearance = wait_for_range() if callable(wait_for_range) else None
+                if callable(wait_for_range):
+                    clearance = (wait_for_range() if self._cancel_event is None else
+                                 wait_for_range(cancel_event=self._cancel_event))
+                else:
+                    clearance = None
+                if self._cancelled():
+                    return False, "任务已取消", last_action_json
                 if clearance is not None and not clearance.get("available"):
                     return False, "运动后未获得稳定的前方测距", ""
 
@@ -108,7 +143,14 @@ class ApproachController:
                 # observation but cannot verify the completed motion.
                 motion_completed_at = time.time()
                 for observation in range(3):
-                    scene = wait_for_scene(motion_completed_at, timeout_sec=5.0)
+                    if self._cancel_event is None:
+                        scene = wait_for_scene(motion_completed_at, timeout_sec=5.0)
+                    else:
+                        scene = wait_for_scene(
+                            motion_completed_at, timeout_sec=5.0, cancel_event=self._cancel_event
+                        )
+                    if self._cancelled():
+                        return False, "任务已取消", last_action_json
                     if scene is None:
                         message = "运动后未收到新视觉帧" if observation == 0 else f"运动后无法重新定位目标 {goal}"
                         return False, message, last_action_json
@@ -126,9 +168,13 @@ class ApproachController:
 
             return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
         except LLMError as exc:
+            if self._cancelled():
+                return False, "任务已取消", ""
             self._logger.warn(f"approach LLM error for task '{task}': {exc}")
             return False, str(exc), ""
         except Exception as exc:  # keep the node alive on unexpected errors
+            if self._cancelled():
+                return False, "任务已取消", ""
             self._logger.error(f"approach error for task '{task}': {exc}")
             return False, f"内部错误：{exc}", ""
 

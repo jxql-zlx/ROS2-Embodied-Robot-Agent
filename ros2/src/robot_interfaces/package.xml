@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>
     ROS2 interfaces for the embodied robot agent: structured RobotCommand /
-    RobotStatus messages and execute/task services (NL task -&gt; agent -&gt; execution).
+    RobotStatus messages and execute/task/cancel services.
   </description>
   <maintainer email="jxql-airobot@users.noreply.github.com">jxql-airobot</maintainer>
   <license>MIT</license>

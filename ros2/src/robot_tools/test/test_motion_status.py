@@ -1,7 +1,7 @@
 """Robot status wait helper tests without a running ROS graph."""
 
 import unittest
-from threading import Condition
+from threading import Condition, Event
 
 from robot_interfaces.msg import RobotStatus
 
@@ -33,6 +33,11 @@ class TestMotionStatusWait(unittest.TestCase):
     def test_error_status_fails_motion_wait(self):
         self.tool._on_status(self._status("rotate", "error", (2, 0)))
         self.assertFalse(self.tool.wait_for_motion_complete((1, 0), 0.001))
+
+    def test_cancelled_motion_wait_exits_immediately(self):
+        cancel_event = Event()
+        cancel_event.set()
+        self.assertFalse(self.tool.wait_for_motion_complete((1, 0), 10.0, cancel_event))
 
 
 if __name__ == "__main__":

@@ -103,6 +103,9 @@ class RobotControlNode(Node):
             action, linear_x, linear_y, angular_z, duration, self._max_linear, self._max_angular
         )
         self._last_action = action
+        if action.strip().lower() == "stop":
+            self._stop(state="stopped", message="stopped")
+            return True, "stopped"
         self._active = vel
         self._remaining = vel.duration if vel.duration > 0 else -1.0
         self._publish_twist(vel)

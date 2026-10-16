@@ -2,7 +2,7 @@
 
 import json
 import unittest
-from threading import Condition
+from threading import Condition, Event
 
 from std_msgs.msg import String
 
@@ -29,6 +29,11 @@ class TestFreshSceneWait(unittest.TestCase):
     def test_frame_from_during_motion_does_not_verify_completed_motion(self):
         self.tool._latest = {"observed_at": 11.0}
         self.assertIsNone(self.tool.wait_for_new_scene(12.0, timeout_sec=0.001))
+
+    def test_cancelled_wait_exits_without_waiting_for_timeout(self):
+        cancel_event = Event()
+        cancel_event.set()
+        self.assertIsNone(self.tool.wait_for_new_scene(12.0, 10.0, cancel_event))
 
 
 if __name__ == "__main__":

@@ -116,6 +116,10 @@ python3 -m streamlit run web/app.py --server.port 8502
   近处障碍、目标不存在、首条运动指令后视觉断流、首条运动指令后激光断流，共 16 个场景。
   脚本检查停止距离、转向方向、失败原因和任务返回后的停车状态；近障碍和缺目标时不应前进。
   仿真底盘增加前部被动支撑，避免前倾导致近距离目标被相机裁切；单帧漏检时最多静止复查两次。
+  任务执行期间可调用 `ros2 service call /task_cancel robot_interfaces/srv/CancelTask "{}"` 请求取消并停车；
+  也可在 `/task_input` 或 `/task_execute` 发送“停止/取消”。普通并发任务会返回忙碌状态。
+  `APPROACH_SCENARIOS=cancel bash scripts/wsl_approach_scenarios.sh simple hierarchical` 可在 Gazebo 中
+  对两种模式触发运动中取消，并检查停止命令、后续动作和停车后的位姿漂移。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

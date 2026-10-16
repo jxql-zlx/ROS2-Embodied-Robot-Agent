@@ -1,6 +1,7 @@
 """Scenario regressions for the shared visual approach controller."""
 
 import unittest
+import threading
 
 from robot_agent.approach import ApproachController
 from robot_agent.llm import MockLLM
@@ -123,6 +124,33 @@ class TestApproachScenarios(unittest.TestCase):
         result = ApproachController(robot, vision, MockLLM()).run("cup", "find cup")
         self.assertFalse(result[0])
         self.assertIn("已过期", result[1])
+        self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
+
+    def test_cancel_during_motion_wait_exits_without_another_move(self):
+        cancel_event = threading.Event()
+        robot = Robot([1.0])
+
+        def wait_for_cancel(_stamp, _timeout, cancel_event=None):
+            cancel_event.wait(2.0)
+            return False
+
+        robot.wait_for_motion_complete = wait_for_cancel
+        result_box = []
+        controller = ApproachController(
+            robot, Vision(["center"]), MockLLM(), cancel_event=cancel_event,
+        )
+        worker = threading.Thread(target=lambda: result_box.append(controller.run("cup", "find cup")))
+        worker.start()
+        for _ in range(100):
+            if robot.actions:
+                break
+            threading.Event().wait(0.01)
+        cancel_event.set()
+        robot.stop()
+        worker.join(1.0)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(result_box[0][0])
+        self.assertIn("任务已取消", result_box[0][1])
         self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
 
     def test_temporary_missed_frame_is_rechecked_without_more_motion(self):

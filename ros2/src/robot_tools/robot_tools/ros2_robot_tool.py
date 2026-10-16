@@ -103,11 +103,14 @@ class Ros2RobotTool(Node, BaseRobotTool):
             self._scan_history.append((self._scan_received_at, self.front_range(msg)))
             self._scan_condition.notify_all()
 
-    def wait_for_front_range(self, timeout_sec: float = 3.0) -> Dict[str, Any]:
+    def wait_for_front_range(self, timeout_sec: float = 3.0, cancel_event=None) -> Dict[str, Any]:
         """Require three consistent scans after allowing the base to settle."""
         started = time.monotonic()
         with self._scan_condition:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return {"name": "front_range", "available": False, "distance": None,
+                            "cancelled": True}
                 samples = [value for stamp, value in self._scan_history if stamp > started + 0.5]
                 recent = samples[-3:]
                 if len(recent) == 3 and all(value is not None for value in recent):
@@ -119,7 +122,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 remaining = started + timeout_sec - time.monotonic()
                 if remaining <= 0:
                     return {"name": "front_range", "available": False, "distance": None}
-                self._scan_condition.wait(remaining)
+                self._scan_condition.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
 
     @staticmethod
     def front_range(scan: LaserScan) -> Optional[float]:
@@ -152,11 +155,14 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self,
         after_stamp: Optional[tuple[int, int]],
         timeout_sec: float,
+        cancel_event=None,
     ) -> bool:
         """Wait for a move/rotate command to report a terminal status."""
         deadline = time.monotonic() + max(0.0, timeout_sec)
         with self._status_condition:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
                 status = self._latest_status
                 if status is not None:
                     stamp = (status.stamp.sec, status.stamp.nanosec)
@@ -169,7 +175,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
-                self._status_condition.wait(remaining)
+                self._status_condition.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
 
     def _publish(self, action: str, **fields: Any) -> bool:
         msg = RobotCommand()
@@ -218,9 +224,23 @@ class Ros2RobotTool(Node, BaseRobotTool):
         goal_msg.pose = pose
         wait = bool(kwargs.get("wait", True))
         timeout = max(0.0, float(kwargs.get("timeout", 120.0)))
+        cancel_event = kwargs.get("cancel_event")
+        command_guard = kwargs.get("command_guard")
+
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        if cancelled():
+            return False
+        if command_guard is None:
+            goal_future = self._nav_client.send_goal_async(goal_msg)
+        else:
+            with command_guard:
+                if cancelled():
+                    return False
+                goal_future = self._nav_client.send_goal_async(goal_msg)
         if not wait:
-            future = self._nav_client.send_goal_async(goal_msg)
-            future.add_done_callback(self._on_nav_goal_response)
+            goal_future.add_done_callback(self._on_nav_goal_response)
             return True
 
         done = Event()
@@ -254,9 +274,20 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 self.get_logger().error(f"Nav2 goal response failed: {exc}")
                 done.set()
 
-        goal_future = self._nav_client.send_goal_async(goal_msg)
         goal_future.add_done_callback(on_goal_response)
-        if not done.wait(timeout):
+        deadline = time.monotonic() + timeout
+        while not done.is_set():
+            if cancelled():
+                timed_out.set()
+                handle = outcome["goal_handle"]
+                if handle is not None:
+                    handle.cancel_goal_async()
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
+        if not done.is_set():
             timed_out.set()
             handle = outcome["goal_handle"]
             if handle is not None:

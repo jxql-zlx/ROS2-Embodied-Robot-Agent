@@ -47,6 +47,7 @@ def generate_launch_description() -> LaunchDescription:
                 "mode": LaunchConfiguration("agent_mode"),
                 "agent_config": LaunchConfiguration("agent_config"),
                 "tool_scan_topic": LaunchConfiguration("tool_scan_topic"),
+                "cancel_service": LaunchConfiguration("cancel_service"),
             }
         ],
     )
@@ -62,6 +63,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("agent_mode", default_value="simple"),
             DeclareLaunchArgument("agent_config", default_value=default_agent_config),
             DeclareLaunchArgument("tool_scan_topic", default_value="/scan"),
+            DeclareLaunchArgument("cancel_service", default_value="/task_cancel"),
             sim,
             robot_control,
             robot_agent,

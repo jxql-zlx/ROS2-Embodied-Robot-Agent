@@ -62,7 +62,7 @@ class _LoopVisionTool:
     def find_object(self, _name):
         return dict(self.scenes[self.index])
 
-    def wait_for_new_scene(self, after_observed_at, timeout_sec):
+    def wait_for_new_scene(self, after_observed_at, timeout_sec, cancel_event=None):
         self.wait_count += 1
         self.cutoffs.append(after_observed_at)
         if self.index + 1 >= len(self.scenes):
@@ -92,7 +92,7 @@ class _LoopRobotTool(_FakeRobotTool):
     def status_stamp(self):
         return (0, self.wait_count)
 
-    def wait_for_motion_complete(self, _after_stamp, _timeout_sec):
+    def wait_for_motion_complete(self, _after_stamp, _timeout_sec, cancel_event=None):
         self.wait_count += 1
         return True
 
