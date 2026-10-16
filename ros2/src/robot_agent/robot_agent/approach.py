@@ -12,14 +12,26 @@ APPROACH_MAX_STEP_DURATION_SEC = 0.5
 
 
 class ApproachController:
-    def __init__(self, robot, vision, llm, stop_distance=0.65, logger=None):
+    def __init__(self, robot, vision, llm, stop_distance=0.65, logger=None, max_steps=8):
         self._robot = robot
         self._vision = vision
         self._llm = llm
         self._stop_distance = float(stop_distance)
         self._logger = logger if logger is not None else logging.getLogger(__name__)
+        self._max_steps = max(1, min(int(max_steps), 20))
 
     def run(self, goal: str, task: str) -> tuple[bool, str, str]:
+        result = self._run(goal, task)
+        if not result[0]:
+            stop = getattr(self._robot, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception as exc:
+                    self._logger.error(f"failed to stop after approach failure: {exc}")
+        return result
+
+    def _run(self, goal: str, task: str) -> tuple[bool, str, str]:
         goal = (goal or "").strip()
         try:
             find_target = lambda: (
@@ -40,23 +52,25 @@ class ApproachController:
                 "status_stamp", "get_sensor", "stop"
             )):
                 return False, "接近需要完整的视觉、运动和测距反馈接口", ""
-            max_steps = 3
+            max_steps = self._max_steps
             last_action_json = ""
             clearance = None
 
             for step in range(max_steps + 1):
                 get_sensor = getattr(self._robot, "get_sensor", None)
                 if closed_loop and callable(get_sensor):
-                    clearance = clearance or get_sensor("front_range")
+                    # Visual re-observation can take seconds. Recheck range
+                    # freshness before each decision, even after a stable scan.
+                    clearance = get_sensor("front_range")
                     if not clearance.get("available"):
                         return False, "前方激光测距不可用或已过期，停止接近", ""
                     objects = vision.get("objects", [])
                     centered = bool(objects) and objects[0].get("direction") == "center"
                     stop_distance = self._stop_distance
                     if float(clearance["distance"]) <= stop_distance:
-                        stopped = self._robot.stop()
-                        if centered and stopped and float(clearance["distance"]) >= stop_distance - 0.25:
-                            return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
+                        if centered and float(clearance["distance"]) >= stop_distance - 0.25:
+                            if self._robot.stop():
+                                return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
                         return False, "前方距离不足，已停止接近", json.dumps(clearance, ensure_ascii=False)
                 if step == max_steps:
                     return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
@@ -83,9 +97,6 @@ class ApproachController:
 
                 duration = max(0.0, motion.duration)
                 if not wait_for_motion(status_stamp, max(3.0, duration + 2.0)):
-                    stop = getattr(self._robot, "stop", None)
-                    if callable(stop):
-                        stop()
                     return False, "运动未能在时限内完成", last_action_json
 
                 wait_for_range = getattr(self._robot, "wait_for_front_range", None)
@@ -96,13 +107,20 @@ class ApproachController:
                 # A frame from during the motion is newer than the previous
                 # observation but cannot verify the completed motion.
                 motion_completed_at = time.time()
-                scene = wait_for_scene(motion_completed_at, timeout_sec=5.0)
-                if scene is None:
-                    return False, "运动后未收到新视觉帧", last_action_json
-                query_scene = getattr(self._vision, "query_scene", None)
-                vision = query_scene(scene, goal) if callable(query_scene) else find_target()
-                if vision.get("stale"):
-                    return False, "运动后的视觉结果已过期", json.dumps(vision, ensure_ascii=False)
+                for observation in range(3):
+                    scene = wait_for_scene(motion_completed_at, timeout_sec=5.0)
+                    if scene is None:
+                        message = "运动后未收到新视觉帧" if observation == 0 else f"运动后无法重新定位目标 {goal}"
+                        return False, message, last_action_json
+                    query_scene = getattr(self._vision, "query_scene", None)
+                    vision = query_scene(scene, goal) if callable(query_scene) else find_target()
+                    if vision.get("stale"):
+                        return False, "运动后的视觉结果已过期", json.dumps(vision, ensure_ascii=False)
+                    if vision.get("found"):
+                        break
+                    # Re-observe while stationary. Never issue another motion
+                    # based on the previous detection after a missed frame.
+                    motion_completed_at = float(scene.get("observed_at", time.time()))
                 if not vision.get("found"):
                     return False, f"运动后无法重新定位目标 {goal}", json.dumps(vision, ensure_ascii=False)
 

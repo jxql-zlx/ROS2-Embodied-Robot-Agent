@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import rclpy
+from rclpy.parameter import Parameter
 
 from robot_agent.llm import MockLLM
 from robot_agent.action_plan import ActionPlan
@@ -163,6 +164,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         ])
         robot = _LoopRobotTool()
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
+        self.agent.set_parameters([Parameter("approach_max_steps", value=3)])
         ok, response, _ = self.agent._handle_approach(
             ActionPlan("approach", goal="cup"), "帮我找杯子"
         )
@@ -189,7 +191,8 @@ class TestAgentApproachRouting(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("未收到新视觉帧", response)
-        self.assertEqual(len(robot.actions), 1)
+        self.assertEqual(len(robot.actions), 2)
+        self.assertEqual(robot.actions[-1]["action"], "stop")
 
     def test_approach_succeeds_at_measured_standoff_distance(self):
         scenes = [
@@ -211,7 +214,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
         self.assertFalse(ok)
         self.assertIn("测距不可用", response)
-        self.assertEqual(robot.actions, [])
+        self.assertEqual([a["action"] for a in robot.actions], ["stop"])
 
     def test_near_blind_zone_return_is_not_reported_as_arrival(self):
         robot = _LoopRobotTool(distances=[0.12])

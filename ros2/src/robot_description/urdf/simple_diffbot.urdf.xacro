@@ -94,6 +94,27 @@
     <origin xyz="-0.11 0 -0.04"/>
   </joint>
 
+  <!-- Front support prevents the camera mass from tipping the body forward. -->
+  <link name="front_caster_wheel">
+    <visual>
+      <geometry><sphere radius="0.02"/></geometry>
+      <material name="dark"/>
+    </visual>
+    <collision>
+      <geometry><sphere radius="0.02"/></geometry>
+    </collision>
+    <xacro:sphere_inertia m="0.05" r="0.02"/>
+  </link>
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_caster_wheel"/>
+    <origin xyz="0.11 0 -0.04"/>
+  </joint>
+  <gazebo reference="front_caster_wheel">
+    <mu1>0.01</mu1>
+    <mu2>0.01</mu2>
+  </gazebo>
+
   <!-- front-facing camera -->
   <link name="camera_link">
     <visual>

@@ -20,17 +20,20 @@ class FlashExecutor(BaseExecutor):
         vision_tool: Any = None,
         llm: Optional[BaseLLM] = None,
         approach_stop_distance: float = 0.65,
+        approach_max_steps: int = 8,
     ) -> None:
         self._robot = robot_tool
         self._vision = vision_tool
         self._llm = llm
         self._approach_stop_distance = approach_stop_distance
+        self._approach_max_steps = approach_max_steps
 
     def _run_approach(self, task: Task, context: Dict[str, Any], target: str) -> TaskResult:
         if self._robot is None or self._vision is None or self._llm is None:
             return TaskResult(task.id, False, "approach tools unavailable", {"recoverable": False})
         success, message, payload = ApproachController(
-            self._robot, self._vision, self._llm, self._approach_stop_distance
+            self._robot, self._vision, self._llm, self._approach_stop_distance,
+            max_steps=self._approach_max_steps,
         ).run(target, context.get("goal", task.name or target))
         data = {"approach": json.loads(payload) if payload else {}, "recoverable": False}
         return TaskResult(task.id, success, message, data)
@@ -59,9 +62,9 @@ class FlashExecutor(BaseExecutor):
         if task.action in ("find_object", "find"):
             data = self._vision.find_object(task.target)
             if isinstance(data, dict) and data.get("stale"):
-                return TaskResult(task.id, False, "vision result is stale", data=data)
+                return TaskResult(task.id, False, "vision result is stale", data={**data, "recoverable": False})
             if isinstance(data, dict) and not data.get("found", True):
-                return TaskResult(task.id, False, f"no target found: {task.target}", data=data)
+                return TaskResult(task.id, False, f"no target found: {task.target}", data={**data, "recoverable": False})
             return TaskResult(task.id, True, "vision ok", data={"vision": data})
         elif task.action in ("observe", "scene", "get_objects"):
             data = self._vision.get_objects()

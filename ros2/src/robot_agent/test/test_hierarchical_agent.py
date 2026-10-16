@@ -133,15 +133,15 @@ class TestHierarchicalAgent(unittest.TestCase):
         agent = build_hierarchical_agent(robot_tool=robot, vision_tool=_FakeVisionTool())
         results = agent.run("找到杯子然后移动过去")
         self.assertTrue(any(not r.success for r in results))
-        self.assertEqual(robot.actions, [])
+        self.assertEqual([a["action"] for a in robot.actions], ["stop"])
 
-    def test_failure_recovery_replans_search(self):
+    def test_absent_target_does_not_trigger_unrequested_search_motion(self):
         vision = _FakeVisionTool(found=False)
         robot = _FakeRobotTool()
         agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot, vision_tool=vision)
         results = agent.run("找到杯子然后移动过去")
         self.assertTrue(any(not r.success for r in results))
-        self.assertTrue(any(a.get("action") == "rotate" for a in robot.actions))
+        self.assertEqual(robot.actions, [])
 
     def test_step_limit_reports_remaining_tasks_as_failure(self):
         agent = HierarchicalAgent(_FixedPlanner(), _FixedExecutor(), max_steps=1)

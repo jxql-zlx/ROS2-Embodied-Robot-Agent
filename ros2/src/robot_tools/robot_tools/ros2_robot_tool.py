@@ -51,6 +51,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
         status_topic: str = "/robot_status",
         odom_topic: str = "/odom",
         navigate_server: str = "/navigate_to_pose",
+        scan_topic: str = "/scan",
     ) -> None:
         Node.__init__(self, node_name)
         self._command_topic = command_topic
@@ -67,7 +68,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self._scan_condition = Condition()
         self._scan_history = deque(maxlen=10)
         self._scan_sub = self.create_subscription(
-            LaserScan, "/scan", self._on_scan, qos_profile_sensor_data
+            LaserScan, scan_topic, self._on_scan, qos_profile_sensor_data
         )
         self._status_condition = Condition()
         self.get_logger().info(
@@ -110,7 +111,9 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 samples = [value for stamp, value in self._scan_history if stamp > started + 0.5]
                 recent = samples[-3:]
                 if len(recent) == 3 and all(value is not None for value in recent):
-                    if max(recent) - min(recent) <= 0.03:
+                    scan = getattr(self, "_latest_scan", None)
+                    blind_margin = scan.range_min + 0.05 if scan is not None else 0.0
+                    if min(recent) > blind_margin and max(recent) - min(recent) <= 0.03:
                         return {"name": "front_range", "available": True,
                                 "distance": sorted(recent)[1], "frame_id": "lidar_link"}
                 remaining = started + timeout_sec - time.monotonic()
@@ -129,7 +132,15 @@ class Ros2RobotTool(Node, BaseRobotTool):
             and math.isfinite(value)
             and scan.range_min <= value <= scan.range_max
         ]
-        return min(ranges) if ranges else None
+        if ranges:
+            return min(ranges)
+        # +inf is the LaserScan representation of no return within sensor
+        # range. It provides clearance, unlike NaN or a missing message.
+        forward = [value for index, value in enumerate(scan.ranges)
+                   if abs(scan.angle_min + index * scan.angle_increment) <= math.radians(10)]
+        if forward and all(value == math.inf for value in forward) and math.isfinite(scan.range_max):
+            return float(scan.range_max)
+        return None
 
     def status_stamp(self) -> Optional[tuple[int, int]]:
         """Return a snapshot token for waiting on a later motion status."""

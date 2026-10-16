@@ -45,10 +45,12 @@ class RobotAgentNode(Node):
         self.declare_parameter("tool_command_topic", "/robot_command")
         self.declare_parameter("tool_status_topic", "/robot_status")
         self.declare_parameter("tool_odom_topic", "/odom")
+        self.declare_parameter("tool_scan_topic", "/scan")
         self.declare_parameter("vision_detections_topic", "/vision/detections")
         self.declare_parameter("mode", "simple")
         self.declare_parameter("agent_config", "")
         self.declare_parameter("approach_stop_distance", 0.65)
+        self.declare_parameter("approach_max_steps", 8)
 
         task_input_topic = self.get_parameter("task_input_topic").value
         task_service = self.get_parameter("task_service").value
@@ -58,6 +60,7 @@ class RobotAgentNode(Node):
             command_topic=self.get_parameter("tool_command_topic").value,
             status_topic=self.get_parameter("tool_status_topic").value,
             odom_topic=self.get_parameter("tool_odom_topic").value,
+            scan_topic=self.get_parameter("tool_scan_topic").value,
         )
         self._vision_tool = vision_tool if vision_tool is not None else Ros2VisionTool(
             detections_topic=self.get_parameter("vision_detections_topic").value
@@ -157,6 +160,7 @@ class RobotAgentNode(Node):
             with open(path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
         config["approach_stop_distance"] = self.get_parameter("approach_stop_distance").value
+        config["approach_max_steps"] = self.get_parameter("approach_max_steps").value
         return build_hierarchical_agent(
             config, robot_tool=self._tool, vision_tool=self._vision_tool
         )
@@ -180,6 +184,7 @@ class RobotAgentNode(Node):
             self._tool, self._vision_tool, self._llm,
             stop_distance=self.get_parameter("approach_stop_distance").value,
             logger=self.get_logger(),
+            max_steps=self.get_parameter("approach_max_steps").value,
         ).run(plan.goal, task)
 
     def _on_task_input(self, msg: String) -> None:

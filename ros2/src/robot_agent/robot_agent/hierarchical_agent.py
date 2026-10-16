@@ -130,5 +130,6 @@ def build_hierarchical_agent(
     executor = FlashExecutor(
         robot_tool=robot_tool, vision_tool=vision_tool, llm=_make_llm("executor"),
         approach_stop_distance=float(config.get("approach_stop_distance", 0.65)),
+        approach_max_steps=int(config.get("approach_max_steps", 8)),
     )
     return HierarchicalAgent(planner=planner, executor=executor)

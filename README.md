@@ -110,6 +110,12 @@ python3 -m streamlit run web/app.py --server.port 8502
   Demo 脚本会重建相关包并检查服务成功、实际位移和最终测距。
   用 `bash scripts/wsl_vision_action_demo.sh hierarchical "找到杯子然后移动过去"`
   可验证分层规划、目标检测、闭环接近和停止判定。缺少反馈接口时接近任务会失败，且不触发通用旋转恢复。
+  `approach_max_steps` 默认 8（限制为 1–20），用于覆盖可视范围内先转向再接近的情况。
+  有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。
+  运行 `bash scripts/wsl_approach_scenarios.sh` 可对两种模式分别验证偏左、偏右、0.8/1.3 米初始距离、
+  近处障碍、目标不存在、首条运动指令后视觉断流、首条运动指令后激光断流，共 16 个场景。
+  脚本检查停止距离、转向方向、失败原因和任务返回后的停车状态；近障碍和缺目标时不应前进。
+  仿真底盘增加前部被动支撑，避免前倾导致近距离目标被相机裁切；单帧漏检时最多静止复查两次。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

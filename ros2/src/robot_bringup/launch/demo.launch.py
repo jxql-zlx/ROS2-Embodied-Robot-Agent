@@ -46,6 +46,7 @@ def generate_launch_description() -> LaunchDescription:
                 "llm_provider": LaunchConfiguration("llm_provider"),
                 "mode": LaunchConfiguration("agent_mode"),
                 "agent_config": LaunchConfiguration("agent_config"),
+                "tool_scan_topic": LaunchConfiguration("tool_scan_topic"),
             }
         ],
     )
@@ -60,6 +61,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("llm_provider", default_value=""),
             DeclareLaunchArgument("agent_mode", default_value="simple"),
             DeclareLaunchArgument("agent_config", default_value=default_agent_config),
+            DeclareLaunchArgument("tool_scan_topic", default_value="/scan"),
             sim,
             robot_control,
             robot_agent,

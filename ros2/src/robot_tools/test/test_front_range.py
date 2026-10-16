@@ -24,12 +24,17 @@ class TestFrontRange(unittest.TestCase):
 
     def test_invalid_returns_and_unknown_frame_are_unavailable(self):
         scan = self.scan()
-        for value in (float("inf"), float("nan"), 0.01, 13.0):
+        for value in (float("nan"), 0.01, 13.0):
             scan.ranges = [0.2, value, 0.3]
             self.assertIsNone(Ros2RobotTool.front_range(scan))
         scan = self.scan()
         scan.header.frame_id = "unknown"
         self.assertIsNone(Ros2RobotTool.front_range(scan))
+
+    def test_infinite_returns_mean_clear_to_sensor_maximum(self):
+        scan = self.scan()
+        scan.ranges = [0.2, float("inf"), 0.3]
+        self.assertEqual(Ros2RobotTool.front_range(scan), 12.0)
 
     @patch("robot_tools.ros2_robot_tool.time.monotonic", return_value=10.0)
     def test_stale_scan_is_unavailable(self, _clock):
@@ -56,6 +61,18 @@ class TestFrontRange(unittest.TestCase):
         tool._scan_condition = MagicMock()
         tool._scan_history = [(0.6, 0.12), (0.7, 0.8), (0.8, 0.4)]
         self.assertFalse(tool.wait_for_front_range()["available"])
+
+    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 0.1])
+    def test_wait_does_not_accept_stable_near_blind_zone_echo(self, _clock):
+        tool = object.__new__(Ros2RobotTool)
+        tool._latest_scan = self.scan()
+        tool._scan_condition = MagicMock()
+        tool._scan_history = [(0.6, 0.12), (0.7, 0.12), (0.8, 0.12)]
+        def receive_scans(_timeout):
+            tool._scan_history.extend([(0.9, 0.81), (1.0, 0.81), (1.1, 0.82)])
+        tool._scan_condition.wait.side_effect = receive_scans
+        result = tool.wait_for_front_range()
+        self.assertEqual(result["distance"], 0.81)
 
 
 if __name__ == "__main__":
