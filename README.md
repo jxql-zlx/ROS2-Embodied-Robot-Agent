@@ -129,6 +129,8 @@ python3 -m streamlit run web/app.py --server.port 8502
   也可在 `/task_input` 或 `/task_execute` 发送“停止/取消”。普通并发任务会返回忙碌状态。
   `APPROACH_SCENARIOS=cancel bash scripts/wsl_approach_scenarios.sh simple hierarchical` 可在 Gazebo 中
   对两种模式触发运动中取消，并检查停止命令、后续动作和停车后的位姿漂移。
+  `bash scripts/wsl_navigation_cancel_scenarios.sh simple hierarchical` 会按 Nav2 目标 UUID
+  验证取消终态、停车后的新鲜里程计和跟进导航到位；每次运行的日志保存在独立临时目录中。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

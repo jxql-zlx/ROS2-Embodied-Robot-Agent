@@ -5,9 +5,20 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_ROOT/ros2/install/setup.bash"
 set -euo pipefail
 
-LOG_DIR="${TMPDIR:-/tmp}/ros2_navigation_cancel"
+LOG_ROOT="${TMPDIR:-/tmp}/ros2_navigation_cancel"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXX")"
 MAP_PREFIX="${TMPDIR:-/tmp}/ros2_navigation_smoke/smoke_map"
-mkdir -p "$LOG_DIR"
+MODES=("$@")
+if [ "${#MODES[@]}" -eq 0 ]; then
+  MODES=(simple hierarchical)
+fi
+for mode in "${MODES[@]}"; do
+  if [ "$mode" != simple ] && [ "$mode" != hierarchical ]; then
+    echo "unknown mode: $mode (expected simple and/or hierarchical)"
+    exit 2
+  fi
+done
 if [ ! -f "${MAP_PREFIX}.yaml" ]; then
   echo "Saved smoke map missing; generating it with the navigation smoke workflow"
   bash "$REPO_ROOT/scripts/wsl_navigation_smoke.sh"
@@ -71,19 +82,16 @@ python3 "$REPO_ROOT/scripts/navigation_smoke_client.py" check-localization
 setsid ros2 run robot_control robot_control_node > "$LOG_DIR/control.log" 2>&1 &
 CONTROL_PID=$!
 
-MODES="${1:-simple hierarchical}"
-for mode in $MODES; do
-  if [ "$mode" != simple ] && [ "$mode" != hierarchical ]; then
-    echo "unknown mode: $mode (expected simple and/or hierarchical)"
-    exit 2
-  fi
+for mode in "${MODES[@]}"; do
   echo "[Nav2 cancellation scenario] mode=$mode"
   setsid ros2 run robot_agent robot_agent_node --ros-args -p "mode:=${mode}" \
     > "$LOG_DIR/agent_${mode}.log" 2>&1 &
   AGENT_PID=$!
   wait_service /task_execute
-  python3 "$REPO_ROOT/scripts/navigation_cancel_scenario.py" "$mode" || {
+  python3 "$REPO_ROOT/scripts/navigation_cancel_scenario.py" "$mode" \
+    | tee "$LOG_DIR/scenario_${mode}.log" || {
     echo "FAIL: $mode cancellation scenario failed"
+    echo "Logs retained in: $LOG_DIR"
     tail -80 "$LOG_DIR/agent_${mode}.log"
     tail -80 "$LOG_DIR/navigation.log"
     exit 1
@@ -92,4 +100,5 @@ for mode in $MODES; do
   AGENT_PID=""
 done
 
-echo "PASS: Agent Nav2 cancellation scenarios completed (modes: $MODES)"
+echo "PASS: Agent Nav2 cancellation scenarios completed (modes: ${MODES[*]})"
+echo "Logs retained in: $LOG_DIR"

@@ -156,6 +156,27 @@ class TestAgentCancellation(unittest.TestCase):
         self.agent._run_task = lambda *_args: (True, "done", "")
         self.assertTrue(self.agent.handle_task("follow-up")[0])
 
+    def test_failed_late_final_stop_keeps_admission_closed_until_cancel_retry(self):
+        self.agent._set_navigation_unresolved(True)
+        with patch.object(self.robot, "stop", side_effect=[True, False, True]):
+            cancel_result = self.agent._cancel_active_task()
+            self.assertFalse(cancel_result[0])
+            self.assertTrue(self.agent._cancellation_pending)
+
+            # The late terminal callback cannot release the lease if its
+            # required final stop command fails.
+            self.agent._set_navigation_unresolved(False)
+            self.assertTrue(self.agent._cancellation_pending)
+            self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+            # A repeated cancel retries stop and then releases the stale lease.
+            retry_result = self.agent._cancel_active_task()
+            self.assertTrue(retry_result[0])
+            self.assertFalse(self.agent._cancellation_pending)
+
+        self.agent._run_task = lambda *_args: (True, "done", "")
+        self.assertTrue(self.agent.handle_task("follow-up")[0])
+
     def test_navigation_final_stop_keeps_task_admission_closed(self):
         navigation_entered = threading.Event()
         final_stop_entered = threading.Event()

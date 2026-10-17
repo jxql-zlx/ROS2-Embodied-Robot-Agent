@@ -95,7 +95,15 @@ class FlashExecutor(BaseExecutor):
             if plan.action == "vision":
                 return TaskResult(task.id, False, "infer resolved to non-motion action")
             success = self._dispatch(plan.to_command_dict(), context)
-            message = plan.response or plan.action if success else f"{plan.action} was rejected"
+            if not success:
+                message = f"{plan.action} was rejected"
+            elif plan.action == "navigate":
+                # The mock planner's response describes navigation as a future
+                # integration. The dispatch callback actually waits for Nav2,
+                # so report its terminal outcome instead of that stale prompt.
+                message = "navigation completed"
+            else:
+                message = plan.response or plan.action
             return TaskResult(task.id, bool(success), message, data={"action": plan.to_command_dict()})
 
         if task.action == "navigate":

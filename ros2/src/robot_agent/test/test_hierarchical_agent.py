@@ -113,6 +113,39 @@ class _CancelDuringTaskExecutor(BaseExecutor):
 
 
 class TestHierarchicalAgent(unittest.TestCase):
+    def test_hierarchical_follow_up_navigation_reports_nav2_completion(self):
+        robot = _FakeRobotTool()
+        navigation_calls = []
+
+        def execute_action(action):
+            if action.get("action") == "navigate":
+                navigation_calls.append(action["goal"])
+                return True  # The node callback returns only after Nav2 succeeds.
+            return robot.execute_action(action)
+
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot)
+        results = agent.run(
+            "Navigate to 1.0,0.5",
+            context={"_execute_action": execute_action},
+        )
+
+        self.assertEqual(navigation_calls, ["1.0,0.5"])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].success)
+        self.assertEqual(results[0].message, "navigation completed")
+
+    def test_hierarchical_follow_up_navigation_failure_is_not_success(self):
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=_FakeRobotTool())
+        results = agent.run(
+            "Navigate to 1.0,0.5",
+            context={"_execute_action": lambda _action: False},
+        )
+
+        self.assertTrue(results)
+        self.assertFalse(results[0].success)
+        self.assertIn("rejected", results[0].message)
+        self.assertFalse(all(result.success for result in results))
+
     def test_cancelled_task_does_not_replan_or_start_dependent_tasks(self):
         cancel_event = threading.Event()
         planner = _FixedPlanner()
