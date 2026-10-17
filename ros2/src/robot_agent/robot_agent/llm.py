@@ -221,6 +221,30 @@ class MockLLM(BaseLLM):
         tasks = []
         text = goal.lower()
         nid = 0
+        has_navigation = any(w in text for w in ("导航", "前往", "navigate", "go to"))
+        has_find = any(w in text for w in ("找", "find", "search", "寻找", "找到"))
+        coordinates = re.search(
+            r"(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)(?:\s*[,，]\s*(-?\d+(?:\.\d+)?))?",
+            goal,
+        )
+        if has_navigation and has_find and coordinates:
+            target = self._extract_vision_target(goal)
+            nav_goal = ",".join(value for value in coordinates.groups() if value is not None)
+            tasks.extend((
+                Task(
+                    id=1, tool="nav", action="navigate", target=nav_goal,
+                    name=f"navigate to {nav_goal}", params={"timeout": 120.0},
+                ),
+                Task(
+                    id=2, tool="vision", action="find_object", target=target,
+                    name=f"find {target} after navigation", depends_on=[1],
+                ),
+                Task(
+                    id=3, tool="robot", action="approach", target=target,
+                    name=f"approach {target}", depends_on=[2],
+                ),
+            ))
+            return Plan(goal=goal, tasks=tasks)
         if any(w in text for w in ("找", "find", "search", "观察", "看到", "detect", "靠近", "approach")):
             target = self._extract_vision_target(goal)
             nid += 1

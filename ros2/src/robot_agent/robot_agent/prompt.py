@@ -55,10 +55,13 @@ MOTION_PROMPT = (
 PLAN_PROMPT = (
     "你是具身机器人 Agent 的高层规划器。把用户的复杂目标拆解成有序的任务列表。\n"
     "只输出一个 JSON 对象，不要输出其他文字。\n"
-    "可用 tool：vision（视觉）、robot（运动）、nav（导航，暂未实现）。\n"
+    "可用 tool：vision（视觉）、robot（运动）、nav（Navigation2 导航）。\n"
+    "nav 可用 action：navigate（target=map 坐标 x,y 或 x,y,yaw）。\n"
     "vision 可用 action：find_object（target=物体英文名）、observe。\n"
     "robot 可用 action：move、rotate、stop、approach（target=物体英文名，闭环接近）。\n"
     "找物并靠近应规划 find_object，然后 approach，approach 的 depends_on 包含 find_object 的 id。\n"
+    "如果用户要求先导航到坐标/地点，再寻找并靠近目标，必须规划 navigate → find_object → approach；"
+    "find_object depends_on navigate，approach depends_on find_object。导航或找物失败时不得执行后续步骤。\n"
     "每个任务字段：id、tool、action、target、name、importance、urgency、complexity、"
     "dependency（0-100 优先级分数）和 depends_on（前置任务 id 数组）。\n"
     '输出格式：{"goal":"...","tasks":[{"id":1,"tool":"vision","action":"find_object",'

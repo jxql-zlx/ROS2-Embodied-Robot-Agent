@@ -131,6 +131,8 @@ python3 -m streamlit run web/app.py --server.port 8502
   对两种模式触发运动中取消，并检查停止命令、后续动作和停车后的位姿漂移。
   `bash scripts/wsl_navigation_cancel_scenarios.sh simple hierarchical` 会按 Nav2 目标 UUID
   验证取消终态、停车后的新鲜里程计和跟进导航到位；每次运行的日志保存在独立临时目录中。
+  取消场景会同时核验 Nav2 目标状态历史、`map→base_footprint` 到位误差、里程计时间戳递增、采样连续性、线速度和航向漂移；标准输出与错误输出均保存在每次运行独立目录中。hierarchical 模式也支持组合任务
+  `导航到 1.0,0.5，然后找杯子并靠近`，按导航成功、视觉找到目标、闭环接近的顺序执行；前一步失败或中途取消会阻止后续步骤。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

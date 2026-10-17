@@ -177,6 +177,67 @@ class TestAgentCancellation(unittest.TestCase):
         self.agent._run_task = lambda *_args: (True, "done", "")
         self.assertTrue(self.agent.handle_task("follow-up")[0])
 
+    def test_stop_exception_is_reported_and_keeps_unresolved_navigation_locked(self):
+        self.agent._set_navigation_unresolved(True)
+        with patch.object(self.robot, "stop", side_effect=RuntimeError("publisher failed")):
+            result = self.agent._cancel_active_task()
+        self.assertFalse(result[0])
+        self.assertIn("publisher failed", result[1])
+        self.assertTrue(self.agent._navigation_unresolved)
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+    def test_failed_stop_for_ordinary_active_task_blocks_until_retry_succeeds(self):
+        for failed_result in (False, RuntimeError("publisher failed")):
+            with self.subTest(failed_result=failed_result):
+                self.agent._task_generation += 1
+                self.agent._active_cancel_event = threading.Event()
+                self.agent._active_task_done = threading.Event()
+                with patch.object(self.robot, "stop", side_effect=[failed_result, True]):
+                    result = self.agent._cancel_active_task()
+                    self.assertFalse(result[0])
+                    self.assertTrue(self.agent._cancellation_pending)
+
+                    # Simulate the canceled non-navigation task returning.
+                    with self.agent._task_guard:
+                        self.agent._active_cancel_event = None
+                        self.agent._active_task_done = None
+                    self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+                    retry_result = self.agent._cancel_active_task()
+                    self.assertTrue(retry_result[0])
+                    self.assertFalse(self.agent._cancellation_pending)
+
+                self.agent._run_task = lambda *_args: (True, "done", "")
+                self.assertTrue(self.agent.handle_task("follow-up")[0])
+
+    def test_final_stop_exception_returns_failure_without_releasing_cancel_lease(self):
+        self.agent._set_navigation_unresolved(True)
+
+        class _TaskDone:
+            def wait(_self, _timeout):
+                self.agent._navigation_unresolved = False
+                return True
+
+        self.agent._active_cancel_event = threading.Event()
+        self.agent._active_task_done = _TaskDone()
+        with patch.object(self.robot, "stop", side_effect=[True, RuntimeError("final stop failed")]):
+            result = self.agent._cancel_active_task()
+        self.assertFalse(result[0])
+        self.assertIn("最终停止指令发送失败", result[1])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+    def test_stale_concurrent_cancel_does_not_stop_a_new_task_generation(self):
+        new_task_event = threading.Event()
+        self.agent._task_generation = 2
+        self.agent._active_cancel_event = new_task_event
+        result = self.agent._cancel_active_task_serialized(1)
+        self.assertTrue(result[0])
+        self.assertIn("已结束", result[1])
+        self.assertFalse(new_task_event.is_set())
+        self.assertEqual(self.robot.actions, [])
+
     def test_navigation_final_stop_keeps_task_admission_closed(self):
         navigation_entered = threading.Event()
         final_stop_entered = threading.Event()

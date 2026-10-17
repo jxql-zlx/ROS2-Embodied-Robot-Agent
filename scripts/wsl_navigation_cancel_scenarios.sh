@@ -8,6 +8,7 @@ set -euo pipefail
 LOG_ROOT="${TMPDIR:-/tmp}/ros2_navigation_cancel"
 mkdir -p "$LOG_ROOT"
 LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXX")"
+echo "RUN_LOG_DIR: $LOG_DIR"
 MAP_PREFIX="${TMPDIR:-/tmp}/ros2_navigation_smoke/smoke_map"
 MODES=("$@")
 if [ "${#MODES[@]}" -eq 0 ]; then
@@ -28,6 +29,7 @@ SIM_PID=""
 NAV_PID=""
 CONTROL_PID=""
 AGENT_PID=""
+SCENARIO_PID=""
 stop_group() {
   local pid="$1"
   [ -n "$pid" ] || return 0
@@ -47,6 +49,7 @@ stop_group() {
   wait "$pid" 2>/dev/null || true
 }
 cleanup() {
+  stop_group "$SCENARIO_PID"
   stop_group "$AGENT_PID"
   stop_group "$CONTROL_PID"
   stop_group "$NAV_PID"
@@ -88,14 +91,20 @@ for mode in "${MODES[@]}"; do
     > "$LOG_DIR/agent_${mode}.log" 2>&1 &
   AGENT_PID=$!
   wait_service /task_execute
-  python3 "$REPO_ROOT/scripts/navigation_cancel_scenario.py" "$mode" \
-    | tee "$LOG_DIR/scenario_${mode}.log" || {
+  setsid python3 "$REPO_ROOT/scripts/navigation_cancel_scenario.py" "$mode" \
+    > "$LOG_DIR/scenario_${mode}.log" 2>&1 &
+  SCENARIO_PID=$!
+  if ! wait "$SCENARIO_PID"; then
+    SCENARIO_PID=""
     echo "FAIL: $mode cancellation scenario failed"
     echo "Logs retained in: $LOG_DIR"
+    tail -100 "$LOG_DIR/scenario_${mode}.log"
     tail -80 "$LOG_DIR/agent_${mode}.log"
     tail -80 "$LOG_DIR/navigation.log"
     exit 1
-  }
+  fi
+  SCENARIO_PID=""
+  cat "$LOG_DIR/scenario_${mode}.log"
   stop_group "$AGENT_PID"
   AGENT_PID=""
 done

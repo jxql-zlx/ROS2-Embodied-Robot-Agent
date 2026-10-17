@@ -113,6 +113,75 @@ class _CancelDuringTaskExecutor(BaseExecutor):
 
 
 class TestHierarchicalAgent(unittest.TestCase):
+    def test_navigation_then_find_and_approach_is_ordered_and_dependent(self):
+        robot = _FakeRobotTool()
+        vision = _FakeVisionTool()
+        events = []
+        original_find = vision.find_object
+
+        def find(target):
+            events.append("find")
+            return original_find(target)
+
+        vision.find_object = find
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot, vision_tool=vision)
+        goal = "导航到 1.0,0.5，然后找杯子并靠近"
+        plan = agent._planner.plan(goal)
+        self.assertEqual([(task.tool, task.action) for task in plan.tasks], [
+            ("nav", "navigate"), ("vision", "find_object"), ("robot", "approach"),
+        ])
+        self.assertEqual([task.depends_on for task in plan.tasks], [[], [1], [2]])
+
+        results = agent.run(goal, context={
+            "_navigate": lambda target, _timeout: events.append(("navigate", target)) or True,
+        })
+        self.assertTrue(all(result.success for result in results), [r.message for r in results])
+        self.assertEqual(events[0], ("navigate", "1.0,0.5"))
+        self.assertEqual(events[1], "find")
+        self.assertTrue(any(action.get("action") == "move" for action in robot.actions))
+
+    def test_navigation_failure_prevents_following_find_and_approach(self):
+        robot = _FakeRobotTool()
+        vision = _FakeVisionTool()
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot, vision_tool=vision)
+        results = agent.run(
+            "导航到 1.0,0.5，然后找杯子并靠近",
+            context={"_navigate": lambda *_args: False},
+        )
+        self.assertFalse(all(result.success for result in results))
+        self.assertIsNone(vision.last_query)
+        self.assertEqual(robot.actions, [])
+
+    def test_missing_target_after_navigation_does_not_approach(self):
+        robot = _FakeRobotTool()
+        vision = _FakeVisionTool(found=False)
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot, vision_tool=vision)
+        results = agent.run(
+            "导航到 1.0,0.5，然后找杯子并靠近",
+            context={"_navigate": lambda *_args: True},
+        )
+        self.assertFalse(all(result.success for result in results))
+        self.assertEqual(vision.last_query, ("find", "cup"))
+        self.assertEqual(robot.actions, [])
+
+    def test_cancellation_after_navigation_prevents_following_find(self):
+        cancel_event = threading.Event()
+        robot = _FakeRobotTool()
+        vision = _FakeVisionTool()
+        agent = build_hierarchical_agent({"provider": "mock"}, robot_tool=robot, vision_tool=vision)
+
+        def navigate(*_args):
+            cancel_event.set()
+            return True
+
+        results = agent.run(
+            "导航到 1.0,0.5，然后找杯子并靠近",
+            context={"_navigate": navigate}, cancel_event=cancel_event,
+        )
+        self.assertTrue(results[-1].data["cancelled"])
+        self.assertIsNone(vision.last_query)
+        self.assertEqual(robot.actions, [])
+
     def test_hierarchical_follow_up_navigation_reports_nav2_completion(self):
         robot = _FakeRobotTool()
         navigation_calls = []

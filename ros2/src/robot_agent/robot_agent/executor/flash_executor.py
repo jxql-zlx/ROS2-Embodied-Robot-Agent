@@ -56,7 +56,7 @@ class FlashExecutor(BaseExecutor):
                     return TaskResult(task.id, False, f"unknown nav action: {task.action}")
                 success = self._navigate(task, context)
                 message = "navigation completed" if success else "navigation failed"
-                return TaskResult(task.id, success, message)
+                return TaskResult(task.id, success, message, {"recoverable": False})
             return TaskResult(task.id, False, f"unknown tool: {task.tool}")
         except Exception as exc:  # keep the loop alive on unexpected errors
             return TaskResult(task.id, False, f"executor error: {exc}")
@@ -108,7 +108,10 @@ class FlashExecutor(BaseExecutor):
 
         if task.action == "navigate":
             success = self._navigate(task, context)
-            return TaskResult(task.id, bool(success), "navigation completed" if success else "navigation failed")
+            return TaskResult(
+                task.id, bool(success), "navigation completed" if success else "navigation failed",
+                {"recoverable": False},
+            )
 
         if task.action in ("move", "rotate", "stop"):
             if task.action == "stop":
