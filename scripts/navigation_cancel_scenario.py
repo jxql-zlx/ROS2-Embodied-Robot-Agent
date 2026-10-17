@@ -20,6 +20,8 @@ class NavigationCancellationScenario(Node):
         self.pose = None
         self.speed = None
         self.navigation_statuses = set()
+        self.navigation_status_history = []
+        self.odom_samples = []
         self.task_client = self.create_client(TaskExecute, "/task_execute")
         self.cancel_client = self.create_client(CancelTask, "/task_cancel")
         self.create_subscription(RobotCommand, "/robot_command", self._on_command, 10)
@@ -36,9 +38,11 @@ class NavigationCancellationScenario(Node):
         self.pose = (position.x, position.y)
         twist = message.twist.twist
         self.speed = max(abs(twist.linear.x), abs(twist.linear.y), abs(twist.angular.z))
+        self.odom_samples.append((time.monotonic(), self.pose, self.speed))
 
     def _on_navigation_status(self, message):
         self.navigation_statuses = {item.status for item in message.status_list}
+        self.navigation_status_history.append((time.monotonic(), sorted(self.navigation_statuses)))
 
     def spin_until(self, predicate, timeout):
         deadline = time.monotonic() + timeout
@@ -65,18 +69,33 @@ def main():
             raise RuntimeError("odometry is unavailable")
 
         start_pose = node.pose
+        start_sample_index = len(node.odom_samples) - 1
         request = TaskExecute.Request()
         request.task = "导航到 2.5,0,0"
         task_future = node.task_client.call_async(request)
-        moved = node.spin_until(
-            lambda: bool(node.navigation_statuses & {
-                GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING
-            }) and node.pose is not None and
+        active_statuses = {GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING}
+        saw_active_navigation = node.spin_until(
+            lambda: bool(node.navigation_statuses & active_statuses), 10.0
+        )
+        moved = saw_active_navigation and node.spin_until(
+            lambda: node.pose is not None and
             math.hypot(node.pose[0] - start_pose[0], node.pose[1] - start_pose[1]) >= 0.25,
             45.0,
         )
         if not moved:
-            raise RuntimeError("navigation did not become active and move at least 0.25 m")
+            samples = node.odom_samples[start_sample_index:]
+            max_displacement = max(
+                (math.hypot(pose[0] - start_pose[0], pose[1] - start_pose[1])
+                 for _, pose, _ in samples),
+                default=0.0,
+            )
+            recent_statuses = node.navigation_status_history[-20:]
+            raise RuntimeError(
+                "navigation did not become active and move at least 0.25 m; "
+                f"saw_active={saw_active_navigation}, start_pose={start_pose}, "
+                f"last_pose={node.pose}, max_odom_displacement={max_displacement:.3f} m, "
+                f"last_speed={node.speed}, recent_statuses={recent_statuses}"
+            )
 
         print(f"active Nav2 statuses: {sorted(node.navigation_statuses)}; pose={node.pose}", flush=True)
         cancel_future = node.cancel_client.call_async(CancelTask.Request())
