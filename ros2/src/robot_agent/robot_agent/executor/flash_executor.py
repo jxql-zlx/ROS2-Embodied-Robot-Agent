@@ -59,27 +59,55 @@ class FlashExecutor(BaseExecutor):
                 return TaskResult(task.id, success, message, {"recoverable": False})
             return TaskResult(task.id, False, f"unknown tool: {task.tool}")
         except Exception as exc:  # keep the loop alive on unexpected errors
-            return TaskResult(task.id, False, f"executor error: {exc}")
+            # An exception is not evidence that repeating the operation is
+            # safe. In particular, a failed perception call must not trigger
+            # the planner's generic rotate-and-observe recovery sequence.
+            return TaskResult(
+                task.id, False, f"executor error: {exc}", {"recoverable": False}
+            )
 
     def _run_vision(self, task: Task) -> TaskResult:
         if self._vision is None:
             return TaskResult(task.id, False, "vision tool unavailable")
         if task.action in ("find_object", "find"):
             data = self._vision.find_object(task.target)
-            if isinstance(data, dict) and data.get("stale"):
+            if not self._valid_vision_result(data, require_found=True):
+                return TaskResult(
+                    task.id, False, "malformed vision result", {"recoverable": False}
+                )
+            if data.get("stale"):
                 return TaskResult(task.id, False, "vision result is stale", data={**data, "recoverable": False})
-            if isinstance(data, dict) and not data.get("found", True):
+            if not data.get("found"):
                 return TaskResult(task.id, False, f"no target found: {task.target}", data={**data, "recoverable": False})
             return TaskResult(task.id, True, "vision ok", data={"vision": data})
         elif task.action in ("observe", "scene", "get_objects"):
             data = self._vision.get_objects()
         else:
             data = self._vision.get_scene()
-        if data is None:
-            return TaskResult(task.id, False, "vision result unavailable")
-        if isinstance(data, dict) and data.get("stale"):
-            return TaskResult(task.id, False, "vision result is stale", data=data)
+        if not self._valid_vision_result(data):
+            return TaskResult(task.id, False, "malformed vision result", {"recoverable": False})
+        if data.get("stale"):
+            return TaskResult(
+                task.id, False, "vision result is stale", {**data, "recoverable": False}
+            )
         return TaskResult(task.id, True, "vision ok", data={"vision": data})
+
+    @staticmethod
+    def _valid_vision_result(data: Any, require_found: bool = False) -> bool:
+        """Reject malformed perception payloads before dependent work can run."""
+        if not isinstance(data, dict):
+            return False
+        objects = data.get("objects")
+        if not isinstance(objects, list):
+            return False
+        if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+               for item in objects):
+            return False
+        if require_found and not isinstance(data.get("found"), bool):
+            return False
+        if "stale" in data and not isinstance(data["stale"], bool):
+            return False
+        return True
 
     def _run_robot(self, task: Task, context: Dict[str, Any]) -> TaskResult:
         if self._robot is None:

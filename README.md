@@ -119,6 +119,8 @@ python3 -m streamlit run web/app.py --server.port 8502
   Demo 脚本会重建相关包并检查服务成功、实际位移和最终测距。
   用 `bash scripts/wsl_vision_action_demo.sh hierarchical "找到杯子然后移动过去"`
   可验证分层规划、目标检测、闭环接近和停止判定。缺少反馈接口时接近任务会失败，且不触发通用旋转恢复。
+  `bash scripts/wsl_composed_navigation_vision.sh success` 会在同一 Gazebo 场景中运行分层导航、真实 YOLO 杯子检测、接近和停车复核；
+  `navigation_failure` 与 `target_absent` 分别验证导航失败和目标缺失时不会执行后续阶段。每次运行在 `/tmp/ros2_composed_navigation/` 下保存总日志和分阶段 JSON。
   `approach_max_steps` 默认 8（限制为 1–20），用于覆盖可视范围内先转向再接近的情况。
   有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。
   运行 `bash scripts/wsl_approach_scenarios.sh` 可对两种模式分别验证偏左、偏右、0.8/1.3 米初始距离、

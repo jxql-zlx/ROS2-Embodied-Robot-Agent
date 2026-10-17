@@ -89,7 +89,12 @@ class ApproachController:
                         if centered and float(clearance["distance"]) >= stop_distance - 0.25:
                             if self._robot.stop():
                                 return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
-                        return False, "前方距离不足，已停止接近", json.dumps(clearance, ensure_ascii=False)
+                        failure = {
+                            **clearance,
+                            "target_direction": objects[0].get("direction") if objects else None,
+                            "stop_distance": stop_distance,
+                        }
+                        return False, "前方距离不足，已停止接近", json.dumps(failure, ensure_ascii=False)
                 if step == max_steps:
                     return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
                 motion = self._llm.plan_motion(task, vision)

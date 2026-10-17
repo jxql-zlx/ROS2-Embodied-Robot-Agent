@@ -164,6 +164,38 @@ class TestHierarchicalAgent(unittest.TestCase):
         self.assertEqual(vision.last_query, ("find", "cup"))
         self.assertEqual(robot.actions, [])
 
+    def test_malformed_vision_result_blocks_approach_and_recovery_motion(self):
+        class MalformedVision(_FakeVisionTool):
+            def find_object(self, _name):
+                return {"found": True, "objects": "not-a-list"}
+
+        robot = _FakeRobotTool()
+        agent = build_hierarchical_agent(
+            {"provider": "mock"}, robot_tool=robot, vision_tool=MalformedVision()
+        )
+
+        results = agent.run("找到杯子然后移动过去")
+
+        self.assertTrue(any(not result.success for result in results))
+        self.assertIn("malformed vision result", " ".join(r.message for r in results))
+        self.assertEqual(robot.actions, [])
+
+    def test_vision_exception_does_not_trigger_recovery_motion(self):
+        class RaisingVision(_FakeVisionTool):
+            def find_object(self, _name):
+                raise RuntimeError("camera stream unavailable")
+
+        robot = _FakeRobotTool()
+        agent = build_hierarchical_agent(
+            {"provider": "mock"}, robot_tool=robot, vision_tool=RaisingVision()
+        )
+
+        results = agent.run("找到杯子然后移动过去")
+
+        self.assertTrue(any(not result.success for result in results))
+        self.assertIn("camera stream unavailable", " ".join(r.message for r in results))
+        self.assertEqual(robot.actions, [])
+
     def test_cancellation_after_navigation_prevents_following_find(self):
         cancel_event = threading.Event()
         robot = _FakeRobotTool()
