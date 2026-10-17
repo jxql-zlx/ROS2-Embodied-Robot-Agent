@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 from typing import Any, Dict, Optional
 import json
 
@@ -75,7 +77,7 @@ class FlashExecutor(BaseExecutor):
                 return TaskResult(
                     task.id, False, "malformed vision result", {"recoverable": False}
                 )
-            if data.get("stale"):
+            if self._vision_result_is_stale(data):
                 return TaskResult(task.id, False, "vision result is stale", data={**data, "recoverable": False})
             if not data.get("found"):
                 return TaskResult(task.id, False, f"no target found: {task.target}", data={**data, "recoverable": False})
@@ -86,14 +88,13 @@ class FlashExecutor(BaseExecutor):
             data = self._vision.get_scene()
         if not self._valid_vision_result(data):
             return TaskResult(task.id, False, "malformed vision result", {"recoverable": False})
-        if data.get("stale"):
+        if self._vision_result_is_stale(data):
             return TaskResult(
                 task.id, False, "vision result is stale", {**data, "recoverable": False}
             )
         return TaskResult(task.id, True, "vision ok", data={"vision": data})
 
-    @staticmethod
-    def _valid_vision_result(data: Any, require_found: bool = False) -> bool:
+    def _valid_vision_result(self, data: Any, require_found: bool = False) -> bool:
         """Reject malformed perception payloads before dependent work can run."""
         if not isinstance(data, dict):
             return False
@@ -105,9 +106,30 @@ class FlashExecutor(BaseExecutor):
             return False
         if require_found and not isinstance(data.get("found"), bool):
             return False
-        if "stale" in data and not isinstance(data["stale"], bool):
+        if not isinstance(data.get("stale"), bool):
             return False
+        # Ros2VisionTool derives these fields from the producer's Unix
+        # observed_at stamp. Fresh payloads must retain that contract through
+        # the planner handoff; stale payloads are handled as stale below.
+        if not data["stale"]:
+            observed_at = data.get("observed_at")
+            age_sec = data.get("age_sec")
+            if (not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool)
+                    or not math.isfinite(observed_at) or observed_at <= 0
+                    or observed_at > time.time()):
+                return False
+            if (not isinstance(age_sec, (int, float)) or isinstance(age_sec, bool)
+                    or not math.isfinite(age_sec) or age_sec < 0):
+                return False
         return True
+
+    def _vision_result_is_stale(self, data: Dict[str, Any]) -> bool:
+        if data["stale"]:
+            return True
+        max_age_sec = float(getattr(self._vision, "max_age_sec", 2.5))
+        observed_at = float(data["observed_at"])
+        age_sec = float(data["age_sec"])
+        return max(time.time() - observed_at, age_sec) > max_age_sec
 
     def _run_robot(self, task: Task, context: Dict[str, Any]) -> TaskResult:
         if self._robot is None:

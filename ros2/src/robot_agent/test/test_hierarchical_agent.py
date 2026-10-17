@@ -2,6 +2,7 @@
 
 import unittest
 import threading
+import time
 
 from robot_agent.hierarchical_agent import build_hierarchical_agent
 from robot_agent.executor.base_executor import BaseExecutor, TaskResult
@@ -53,17 +54,18 @@ class _FakeVisionTool:
     def find_object(self, name):
         self.last_query = ("find", name)
         if not self.found:
-            return {"found": False, "objects": []}
+            return {"found": False, "objects": [], **self._freshness()}
         return {
             "found": True,
             "objects": [
                 {"name": name, "confidence": 0.9, "center_x": 320.0, "center_y": 240.0, "direction": self.direction}
             ],
+            **self._freshness(),
         }
 
     def get_objects(self):
         self.last_query = ("scene", "")
-        return {"found": self.found, "objects": []}
+        return {"found": self.found, "objects": [], **self._freshness()}
 
     def wait_for_new_scene(self, _after, timeout_sec):
         return self.find_object("cup")
@@ -72,7 +74,11 @@ class _FakeVisionTool:
         return scene
 
     def get_scene(self):
-        return {"found": self.found, "objects": []}
+        return {"found": self.found, "objects": [], **self._freshness()}
+
+    @staticmethod
+    def _freshness():
+        return {"stale": False, "age_sec": 0.0, "observed_at": time.time()}
 
 
 class _FixedPlanner(BasePlanner):

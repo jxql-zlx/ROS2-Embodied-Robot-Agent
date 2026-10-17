@@ -1,6 +1,8 @@
 """Tests for command acceptance and navigation completion handling."""
 
 import unittest
+import math
+import time
 
 from robot_agent.executor.flash_executor import FlashExecutor
 from robot_agent.llm import MockLLM
@@ -32,6 +34,14 @@ class _CenteredVision:
         return {"found": True, "objects": [{"name": "cup", "direction": "center"}]}
 
 
+class _PayloadVision:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def find_object(self, _name):
+        return self.payload
+
+
 class TestFlashExecutor(unittest.TestCase):
     def test_navigation_task_reports_final_success(self):
         robot = _Robot(nav_result=True)
@@ -60,6 +70,45 @@ class TestFlashExecutor(unittest.TestCase):
 
     def test_stale_vision_does_not_count_as_a_valid_observation(self):
         result = FlashExecutor(vision_tool=_StaleVision()).execute(
+            Task(id=1, tool="vision", action="find_object", target="cup"), {}
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, "vision result is stale")
+
+    def test_fresh_vision_requires_ros_observation_metadata(self):
+        payload = {
+            "found": True,
+            "objects": [{"name": "cup"}],
+            "stale": False,
+            "observed_at": time.time(),
+            "age_sec": 0.01,
+        }
+        result = FlashExecutor(vision_tool=_PayloadVision(payload)).execute(
+            Task(id=1, tool="vision", action="find_object", target="cup"), {}
+        )
+        self.assertTrue(result.success)
+
+        for malformed in (
+            {key: value for key, value in payload.items() if key != "stale"},
+            {**payload, "observed_at": math.nan},
+            {**payload, "observed_at": time.time() + 1.0},
+        ):
+            with self.subTest(payload=malformed):
+                result = FlashExecutor(vision_tool=_PayloadVision(malformed)).execute(
+                    Task(id=1, tool="vision", action="find_object", target="cup"), {}
+                )
+                self.assertFalse(result.success)
+                self.assertEqual(result.message, "malformed vision result")
+
+    def test_expired_vision_payload_is_rejected_as_stale(self):
+        payload = {
+            "found": True,
+            "objects": [{"name": "cup"}],
+            "stale": False,
+            "observed_at": time.time() - 3.0,
+            "age_sec": 3.0,
+        }
+        result = FlashExecutor(vision_tool=_PayloadVision(payload)).execute(
             Task(id=1, tool="vision", action="find_object", target="cup"), {}
         )
         self.assertFalse(result.success)

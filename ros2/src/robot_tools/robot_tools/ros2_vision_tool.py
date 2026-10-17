@@ -31,6 +31,11 @@ class Ros2VisionTool(Node):
         self._sub = self.create_subscription(String, detections_topic, self._on_scene, 10)
         self.get_logger().info(f"Ros2VisionTool ready: detections->{detections_topic}")
 
+    @property
+    def max_age_sec(self) -> float:
+        """Maximum accepted age for a camera-derived scene."""
+        return self._max_age_sec
+
     def _on_scene(self, msg: String) -> None:
         try:
             scene = json.loads(msg.data)
