@@ -3,8 +3,11 @@
 import unittest
 import threading
 import time
+import json
+from types import SimpleNamespace
 
-from robot_agent.approach import ApproachController
+from robot_agent.action_plan import ActionPlan
+from robot_agent.approach import ApproachController, approach_safe_stop_distance
 from robot_agent.llm import MockLLM
 
 
@@ -111,7 +114,8 @@ class TestApproachScenarios(unittest.TestCase):
             with self.subTest(direction=direction):
                 robot = Robot([12.0, 1.0, 0.6])
                 result = ApproachController(robot, Vision([direction, "center", "center"]), MockLLM()).run("cup", "find cup")
-                self.assertTrue(result[0])
+                self.assertFalse(result[0])
+                self.assertIn("目标到达未确认", result[1])
                 self.assertEqual([a["action"] for a in robot.actions], ["rotate", "move", "stop"])
                 self.assertGreater(robot.actions[0]["angular_z"] * sign, 0)
 
@@ -121,12 +125,13 @@ class TestApproachScenarios(unittest.TestCase):
         self.assertFalse(result[0])
         self.assertEqual(robot.actions, [{"action": "stop"}])
 
-    def test_near_and_far_starting_distances_complete_within_step_budget(self):
+    def test_near_and_far_starting_distances_stop_at_safe_boundary(self):
         for ranges in ([0.8, 0.6], [1.3, 1.1, 0.9, 0.85, 0.6]):
             with self.subTest(ranges=ranges):
                 robot = Robot(ranges)
                 result = ApproachController(robot, Vision(["center"] * len(ranges)), MockLLM()).run("cup", "find cup")
-                self.assertTrue(result[0])
+                self.assertFalse(result[0])
+                self.assertIn("目标到达未确认", result[1])
                 self.assertEqual(robot.actions[-1]["action"], "stop")
 
     def test_close_obstacle_causes_failure_without_forward_motion(self):
@@ -135,6 +140,7 @@ class TestApproachScenarios(unittest.TestCase):
         self.assertFalse(result[0])
         self.assertIn("距离不足", result[1])
         self.assertEqual(robot.actions, [{"action": "stop"}])
+        self.assertEqual(json.loads(result[2])["approach_state"], "clearance_below_stop_distance")
 
     def test_vision_dropout_stops_after_completed_short_step(self):
         robot = Robot([1.0])
@@ -220,9 +226,121 @@ class TestApproachScenarios(unittest.TestCase):
         robot = Robot([1.0, 0.6])
         vision = Vision(["center", None, "center"])
         result = ApproachController(robot, vision, MockLLM()).run("cup", "find cup")
-        self.assertTrue(result[0])
+        self.assertFalse(result[0])
+        self.assertIn("目标到达未确认", result[1])
         self.assertEqual(vision.step, 2)
         self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
+
+    def test_safe_stop_boundary_is_exact_and_not_target_arrival(self):
+        boundary = approach_safe_stop_distance(0.65)
+        self.assertAlmostEqual(boundary, 0.79)
+        for distance in (boundary - 1e-6, boundary):
+            with self.subTest(distance=distance):
+                robot = Robot([distance])
+                result = ApproachController(robot, Vision(["center"]), MockLLM()).run("cup", "find cup")
+                self.assertFalse(result[0])
+                evidence = json.loads(result[2])
+                self.assertEqual(evidence["approach_state"], "safe_stop_boundary_reached")
+                self.assertFalse(evidence["target_arrival_confirmed"])
+                self.assertEqual(evidence["target_association"], "unknown")
+                self.assertEqual([action["action"] for action in robot.actions], ["stop"])
+                self.assertIsNone(evidence["motion_command_id"])
+                self.assertEqual(evidence["stop_command_id"], "stop-1")
+
+    def test_invalid_stop_distance_fails_closed_before_motion(self):
+        for distance in (0.0, -0.1, float("nan"), float("inf")):
+            with self.subTest(distance=distance):
+                with self.assertRaises(ValueError):
+                    approach_safe_stop_distance(distance)
+                robot = Robot([2.0])
+                result = ApproachController(
+                    robot, Vision(["center"]), MockLLM(), stop_distance=distance
+                ).run("cup", "find cup")
+                self.assertFalse(result[0])
+                self.assertIn("停止距离必须是有限正数", result[1])
+                self.assertEqual([action["action"] for action in robot.actions], ["stop"])
+
+    def test_just_above_boundary_dispatches_only_a_safe_control_period(self):
+        distance = approach_safe_stop_distance(0.65) + 1e-5
+        robot = Robot([distance, distance])
+        result = ApproachController(robot, Vision(["center"]), MockLLM()).run("cup", "find cup")
+        self.assertFalse(result[0])
+        self.assertEqual([action["action"] for action in robot.actions], ["move", "stop"])
+        self.assertLessEqual(robot.actions[0]["duration"], 0.5)
+        self.assertGreaterEqual(robot.actions[0]["duration"], 0.1)
+        evidence = json.loads(result[2])
+        self.assertEqual(evidence["motion_command_id"], "motion-1")
+        self.assertEqual(evidence["stop_command_id"], "stop-2")
+        self.assertEqual(evidence["executed_motion"]["action"], "move")
+        self.assertEqual(len(evidence["executed_motions"]), 1)
+
+    def test_unaccepted_plan_is_not_reported_as_executed_motion(self):
+        class RejectedRobot(Robot):
+            def execute_action(self, command):
+                self.actions.append(command)
+                return False
+
+        class LongPlanLLM(MockLLM):
+            def plan_motion(self, task, vision):
+                return ActionPlan("move", linear_x=0.3, duration=1.6666667)
+
+        robot = RejectedRobot([2.0])
+        result = ApproachController(robot, Vision(["center"]), LongPlanLLM()).run("cup", "find cup")
+        evidence = json.loads(result[2])
+        self.assertFalse(result[0])
+        self.assertAlmostEqual(evidence["planned_motion"]["duration"], 1.6666667)
+        self.assertEqual(evidence["dispatch_attempted_motion"]["duration"], 0.5)
+        self.assertIsNone(evidence["executed_motion"])
+        self.assertIsNone(evidence["motion_command_id"])
+        self.assertEqual(evidence["stop_command_id"], "stop-2")
+
+    def test_duplicate_target_names_fail_closed_before_motion(self):
+        class DuplicateVision(Vision):
+            def find_object(self, _target):
+                return {
+                    "found": True,
+                    "objects": [
+                        {"name": "cup", "direction": "center"},
+                        {"name": "cup", "direction": "left"},
+                    ],
+                    "observed_at": time.time(), "age_sec": 0.0, "stale": False,
+                }
+
+        robot = Robot([2.0])
+        result = ApproachController(robot, DuplicateVision(["center"]), MockLLM()).run("cup", "find cup")
+        self.assertFalse(result[0])
+        self.assertEqual([action["action"] for action in robot.actions], ["stop"])
+
+    def test_motion_direction_speed_and_translation_are_validated(self):
+        cases = (
+            (ActionPlan("move", linear_x=-0.1, duration=0.2), "center"),
+            (ActionPlan("move", linear_x=0.31, duration=0.2), "center"),
+            (ActionPlan("move", linear_x=0.1, linear_y=0.01, duration=0.2), "center"),
+            (SimpleNamespace(action="move", linear_x=float("nan"), linear_y=0.0,
+                             angular_z=0.0, duration=0.2), "center"),
+            (ActionPlan("rotate", angular_z=-0.2, duration=0.2), "left"),
+        )
+        for motion, direction in cases:
+            with self.subTest(motion=motion):
+                valid, _ = ApproachController._validate_motion(motion, direction)
+                self.assertFalse(valid)
+
+    def test_lower_legal_speed_and_custom_stop_distance_keep_same_contract(self):
+        class SlowLLM(MockLLM):
+            def plan_motion(self, task, vision):
+                return ActionPlan("move", linear_x=0.1, duration=0.2)
+
+        stop_distance = 0.7
+        boundary = approach_safe_stop_distance(stop_distance)
+        self.assertAlmostEqual(boundary, 0.84)
+        robot = Robot([1.0])
+        controller = ApproachController(
+            robot, Vision(["center"]), SlowLLM(), stop_distance=stop_distance
+        )
+        result = controller.run("cup", "find cup")
+        self.assertFalse(result[0])
+        self.assertEqual(robot.actions[0]["linear_x"], 0.1)
+        self.assertEqual(robot.actions[0]["duration"], 0.2)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,19 @@ APPROACH_CONTROL_PERIOD_SEC = 0.1
 APPROACH_BRAKING_MARGIN_M = 0.08
 
 
+def approach_safe_stop_distance(stop_distance: float) -> float:
+    """Threshold leaving margin for braking and two 10 Hz control cycles.
+
+    One cycle covers sensor/dispatch latency and the second is the next
+    controller update. At defaults: 0.65 + 0.08 + 2 * 0.3 * 0.1 = 0.79 m.
+    """
+    stop_distance = float(stop_distance)
+    if not math.isfinite(stop_distance) or stop_distance <= 0.0:
+        raise ValueError("approach stop distance must be finite and greater than zero")
+    return (stop_distance + APPROACH_BRAKING_MARGIN_M
+            + APPROACH_MAX_LINEAR_SPEED * 2.0 * APPROACH_CONTROL_PERIOD_SEC)
+
+
 class ApproachController:
     def __init__(
         self, robot, vision, llm, stop_distance=0.65, logger=None, max_steps=8,
@@ -33,41 +46,55 @@ class ApproachController:
         self._stop_callback = stop_and_confirm
         self._motion_wait_managed = bool(motion_wait_managed)
         self._last_stop_confirmation = "unknown"
+        self._stop_attempted = False
+        self._stop_command_id = None
+        self._planned_motion = None
+        self._dispatch_attempted_motion = None
+        self._executed_motion = None
+        self._executed_motions = []
+        self._motion_command_id = None
 
     def _cancelled(self) -> bool:
         return self._cancel_event is not None and self._cancel_event.is_set()
 
     def run(self, goal: str, task: str) -> tuple[bool, str, str]:
         if self._cancelled():
-            return False, "任务已取消", ""
+            return False, "任务已取消", self._result_evidence("")
         result = self._run(goal, task)
         if self._cancelled():
-            return False, "任务已取消", result[2]
+            return False, "任务已取消", self._result_evidence(result[2])
         if not result[0]:
-            if not self._stop_and_confirm():
+            if not self._stop_attempted and not self._stop_and_confirm():
                 result = (False, f"{result[1]}；停止状态未确认", result[2])
-            result = (result[0], result[1], self._add_stop_evidence(
-                result[2], self._last_stop_confirmation
-            ))
-        return result
+        return (result[0], result[1], self._result_evidence(result[2]))
 
-    @staticmethod
-    def _add_stop_evidence(payload: str, confirmation_type: str) -> str:
+    def _result_evidence(self, payload: str) -> str:
         try:
             evidence = json.loads(payload) if payload else {}
         except (TypeError, ValueError):
             evidence = {"detail": payload}
         if not isinstance(evidence, dict):
             evidence = {"detail": evidence}
-        evidence["stop_confirmation_type"] = confirmation_type
+        evidence["planned_motion"] = self._planned_motion
+        evidence["dispatch_attempted_motion"] = self._dispatch_attempted_motion
+        evidence["executed_motion"] = self._executed_motion
+        evidence["executed_motions"] = list(self._executed_motions)
+        evidence["motion_command_id"] = self._motion_command_id
+        evidence["stop_command_id"] = self._stop_command_id
+        evidence["stop_confirmation_type"] = self._last_stop_confirmation
         evidence["physical_stop_confirmed"] = False
         return json.dumps(evidence, ensure_ascii=False)
 
     def _stop_and_confirm(self) -> bool:
+        self._stop_attempted = True
+        command_id_before = getattr(self._robot, "latest_command_id", None)
         if callable(self._stop_callback):
             try:
                 confirmed = bool(self._stop_callback("approach"))
                 self._last_stop_confirmation = "control_ack" if confirmed else "unconfirmed"
+                command_id_after = getattr(self._robot, "latest_command_id", None)
+                if command_id_after != command_id_before:
+                    self._stop_command_id = command_id_after
                 return confirmed
             except Exception as exc:
                 self._logger.error(f"failed to confirm stop after approach: {exc}")
@@ -80,9 +107,16 @@ class ApproachController:
             return False
         try:
             before_stamp = stamp()
-            if not stop():
-                return False
+            accepted = stop()
             command_id = getattr(self._robot, "latest_command_id", None)
+            if command_id != command_id_before:
+                self._stop_command_id = command_id
+            if not accepted:
+                self._last_stop_confirmation = "unconfirmed"
+                return False
+            if command_id is None or command_id == command_id_before:
+                self._last_stop_confirmation = "unconfirmed"
+                return False
             confirmed = bool(confirm(before_stamp, timeout_sec=2.0, command_id=command_id))
             self._last_stop_confirmation = "control_ack" if confirmed else "unconfirmed"
             return confirmed
@@ -156,23 +190,32 @@ class ApproachController:
         return True, ""
 
     @staticmethod
-    def _clearance_success(clearance) -> str:
+    def _clearance_failure(clearance, direction, stop_distance, safe_stop_distance):
+        distance = float(clearance["distance"])
+        too_close = distance < stop_distance
         evidence = {
-            "approach_state": "front_clearance_threshold_reached",
+            **clearance,
+            "target_direction": direction,
+            "stop_distance": stop_distance,
+            "safe_stop_distance": safe_stop_distance,
+            "approach_state": (
+                "clearance_below_stop_distance" if too_close
+                else "safe_stop_boundary_reached"
+            ),
             "target_arrival_confirmed": False,
             "target_association": "unknown",
-            "distance_source": "front_lidar",
-            "stop_confirmation_type": "control_ack",
-            "physical_stop_confirmed": False,
-            "clearance": clearance,
         }
-        return json.dumps(evidence, ensure_ascii=False)
+        message = ("前方距离不足，已停止接近；目标到达未确认" if too_close
+                   else "已到安全停车边界；目标到达未确认")
+        return False, message, json.dumps(evidence, ensure_ascii=False)
 
     def _run(self, goal: str, task: str) -> tuple[bool, str, str]:
         goal = (goal or "").strip()
         try:
             if not goal:
                 return False, "接近任务缺少目标名称。", ""
+            if not math.isfinite(self._stop_distance) or self._stop_distance <= 0.0:
+                return False, "接近停止距离必须是有限正数，停止接近", ""
             if self._cancelled():
                 return False, "任务已取消", ""
             find_target = lambda: (
@@ -214,23 +257,16 @@ class ApproachController:
                     direction = target_object.get("direction") if target_object else None
                     centered = direction == "center"
                     stop_distance = self._stop_distance
-                    safe_stop_distance = (stop_distance + APPROACH_BRAKING_MARGIN_M
-                                          + 2.0 * APPROACH_MAX_LINEAR_SPEED * APPROACH_CONTROL_PERIOD_SEC)
+                    safe_stop_distance = approach_safe_stop_distance(stop_distance)
                     if float(clearance["distance"]) <= safe_stop_distance:
-                        if centered and float(clearance["distance"]) >= stop_distance - 0.25:
-                            if self._stop_and_confirm():
-                                return (True, "已达到安全制动停止距离净空阈值；目标到达未确认",
-                                        self._clearance_success(clearance))
-                        failure = {
-                            **clearance,
-                            "target_direction": direction,
-                            "stop_distance": stop_distance,
-                        }
-                        return False, "前方距离不足，已停止接近", json.dumps(failure, ensure_ascii=False)
+                        return self._clearance_failure(
+                            clearance, direction, stop_distance, safe_stop_distance
+                        )
                 if step == max_steps:
                     return False, "达到视觉接近步数上限，目标仍未确认到达", last_action_json
                 motion = self._llm.plan_motion(task, vision)
-                last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
+                self._planned_motion = motion.to_command_dict()
+                last_action_json = json.dumps(self._planned_motion, ensure_ascii=False)
                 target_object = self._matching_target(vision, goal)
                 direction = target_object.get("direction") if target_object else None
                 valid_motion, motion_error = self._validate_motion(motion, direction)
@@ -247,16 +283,11 @@ class ApproachController:
                 if (not isinstance(clearance, dict) or clearance.get("available") is not True
                         or not self._finite_number(clearance.get("distance"))):
                     return False, "规划完成后前方测距已过期", last_action_json
-                safe_stop_distance = (stop_distance + APPROACH_BRAKING_MARGIN_M
-                                      + 2.0 * APPROACH_MAX_LINEAR_SPEED * APPROACH_CONTROL_PERIOD_SEC)
+                safe_stop_distance = approach_safe_stop_distance(stop_distance)
                 if float(clearance["distance"]) <= safe_stop_distance:
-                    target_object = self._matching_target(vision, goal)
-                    centered = bool(target_object and target_object.get("direction") == "center")
-                    if (centered and float(clearance["distance"]) >= stop_distance - 0.25
-                            and self._stop_and_confirm()):
-                        return (True, "已达到安全制动停止距离净空阈值；目标到达未确认",
-                                self._clearance_success(clearance))
-                    return False, "规划完成后前方距离不足，停止接近", json.dumps(clearance, ensure_ascii=False)
+                    return self._clearance_failure(
+                        clearance, direction, stop_distance, safe_stop_distance
+                    )
                 if motion.action == "move" and motion.linear_x > 0:
                     usable_margin = (float(clearance["distance"]) - stop_distance
                                      - APPROACH_BRAKING_MARGIN_M
@@ -271,9 +302,19 @@ class ApproachController:
                 if self._cancelled():
                     return False, "任务已取消", last_action_json
                 dispatch = self._execute_action or self._robot.execute_action
+                command_id_before = getattr(self._robot, "latest_command_id", None)
+                self._dispatch_attempted_motion = motion.to_command_dict()
                 if not dispatch(motion.to_command_dict()):
                     return False, "执行层未接受运动命令", last_action_json
                 command_id = getattr(self._robot, "latest_command_id", None)
+                if command_id == command_id_before:
+                    command_id = None
+                self._executed_motion = motion.to_command_dict()
+                self._motion_command_id = command_id
+                self._executed_motions.append({
+                    "command": self._executed_motion,
+                    "command_id": command_id,
+                })
                 self._logger.info(f"approach '{task}' step={step + 1} -> {last_action_json}")
 
                 duration = max(0.0, motion.duration)

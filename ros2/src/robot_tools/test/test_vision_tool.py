@@ -23,7 +23,10 @@ class TestVisionToolQuery(unittest.TestCase):
         tool = object.__new__(Ros2VisionTool)
         tool._max_age_sec = 2.5
         tool._latest = {"observed_at": 100.0, "objects": []}
-        scene = {**SCENE, "observed_at": 99.0}
+        scene = {
+            **SCENE, "observed_at": 99.0, "source_time_status": "verified",
+            "source_stamp_ns": 10_000_000_000, "source_age_sec": 0.0,
+        }
         result = tool.query_scene(scene, "cup")
         self.assertTrue(result["found"])
         self.assertEqual(result["observed_at"], 99.0)
@@ -79,20 +82,57 @@ class TestVisionToolQuery(unittest.TestCase):
         self.assertEqual(obj["direction"], "unknown")
 
     def test_scene_timestamp_freshness(self):
-        fresh, age = Ros2VisionTool._freshness({"observed_at": 98.0}, 100.0, 2.5)
+        fresh, age = Ros2VisionTool._freshness({
+            "observed_at": 98.0, "source_time_status": "verified",
+            "source_stamp_ns": 1, "source_age_sec": 0.0,
+        }, 100.0, 2.5)
         self.assertTrue(fresh)
         self.assertEqual(age, 2.0)
 
     def test_missing_expired_and_future_timestamps_are_stale(self):
         self.assertEqual(Ros2VisionTool._freshness({}, 100.0, 2.5), (False, None))
         self.assertEqual(
-            Ros2VisionTool._freshness({"observed_at": 90.0}, 100.0, 2.5),
+            Ros2VisionTool._freshness({
+                "observed_at": 90.0, "source_time_status": "verified",
+                "source_stamp_ns": 1, "source_age_sec": 0.0,
+            }, 100.0, 2.5),
             (False, 10.0),
         )
         self.assertEqual(
-            Ros2VisionTool._freshness({"observed_at": 101.0}, 100.0, 2.5),
+            Ros2VisionTool._freshness({
+                "observed_at": 101.0, "source_time_status": "verified",
+                "source_stamp_ns": 1, "source_age_sec": 0.0,
+            }, 100.0, 2.5),
             (False, None),
         )
+
+    def test_missing_or_degraded_source_time_fails_closed(self):
+        self.assertEqual(Ros2VisionTool._freshness({
+            "observed_at": 99.0,
+        }, 100.0, 2.5), (False, None))
+
+    def test_non_object_scene_fails_closed(self):
+        self.assertEqual(Ros2VisionTool._freshness(["unexpected"], 100.0, 2.5), (False, None))
+        self.assertEqual(Ros2VisionTool._freshness({
+            "observed_at": 99.0, "source_time_status": "unknown",
+            "source_stamp_ns": None, "source_age_sec": None,
+        }, 100.0, 2.5), (False, None))
+
+    def test_ros_source_age_and_inference_delay_are_both_counted(self):
+        fresh, age = Ros2VisionTool._freshness({
+            "observed_at": 98.0, "source_time_status": "verified",
+            "source_stamp_ns": 1, "source_age_sec": 1.0,
+        }, 100.0, 2.5)
+        self.assertFalse(fresh)
+        self.assertEqual(age, 3.0)
+
+    def test_small_future_source_skew_within_tolerance_has_zero_age(self):
+        fresh, age = Ros2VisionTool._freshness({
+            "observed_at": 100.0, "source_time_status": "verified",
+            "source_stamp_ns": 1, "source_age_sec": -0.05,
+        }, 100.02, 2.5)
+        self.assertTrue(fresh)
+        self.assertEqual(age, 0.0)
 
 
 if __name__ == "__main__":

@@ -34,3 +34,17 @@
 - 组合 Gazebo 的 success、navigation_failure、target_absent、blocked、vision_dropout、range_dropout 六场景通过外层断言。成功结果保留 target_arrival_confirmed=false 和 physical_stop_confirmed=false；停车后观测由外层里程计单独核验。
 - 集成首次暴露安全制动最短步长边界低估，已将停止边界改为目标停止距离+制动余量+两个控制周期距离。重新跑单测、构建和完整 success 场景通过；失败过程记录在 validation.md。
 - `66a2d7e fix: harden ROS2 task cancellation and approach safety` 已推送 `origin/main`，推送后检查工作区干净；独立 16 项 approach 场景矩阵本轮未执行。
+
+## 2026-10-18 追加复核与验收
+- 从 `aae2bd4`（与 `origin/main` 同步、工作区干净）开始本轮实现；Luna 子代理分别完成 approach 契约、取消生命周期、ROS/视觉时效性和视觉 smoke 启动参数。
+- 全量测试最初发现 6 个旧用例仍把 safe-stop 当成 approach success；更新单项和 hierarchical 的结果断言后，最终 `scripts/run_tests.sh` 通过 236 项：robot_control 11、robot_tools 65、robot_agent 148、vision 12。
+- 全量 `scripts/wsl_build.sh` 最终构建通过，6 个 ROS2 包完成。
+- 修复额外发现的仿真时钟回调问题：10 ms 前跳阈值会把常规 10 Hz ROS clock tick 当作跳变并持续清缓存；vision 与 robot_tools 改用 1 s 前跳阈值，时钟源切换和显著回退仍触发新 epoch。
+- 将容差内小幅未来相机时间的计算年龄归零，保留超过容差/过期数据拒绝；增加真实 Gazebo 可信帧就绪门禁，避免在 clock warmup 期间提前提交任务。
+- simple 与 hierarchical 接近矩阵共 16 场景通过；包含 left/right 方向、近/远、阻挡、目标缺失、视觉断流、测距断流。日志分别为 `/tmp/approach_scenarios/run.7mK9Ni`、`/tmp/approach_scenarios/run.kPlqHD`。
+- Gazebo vision smoke 通过；组合导航→YOLO→接近安全停车通过，结果明确目标到达未确认，连续停车窗口 23 个新鲜 odom 样本、漂移和偏航为 0。
+- simple/hierarchical Nav2 cancel 回归通过：取消目标 CANCELED、follow-up 导航成功、停止后各 51 个新鲜 odom 样本且漂移 0；日志 `/tmp/ros2_navigation_cancel/run.qIfGU0`。
+- 保留重要限制：前向激光净空不证明杯子到达；approach 周期余量仍按默认 10 Hz，未读取可覆盖的 `robot_control.update_rate`；未连接在线模型或真机。
+- 最终复核发现停止距离参数需要额外输入校验；0、负数、NaN/Inf 现在失败关闭且不派发运动。`test_approach_scenarios.py` 定向 21 项通过；之后重跑全量单测共 237 项通过，6 包构建通过。
+- 最后审查增加非对象视觉场景 fail-closed 校验及回归用例；视觉工具定向测试通过（14 项）。全量测试基于前述 237 项结果，加该新增用例共 238 项。
+- 当前尚未创建本次提交或推送；待最终 review 后由主代理按要求完成 Git 收尾。无等待 GPT-6.1 Sol 授权项。

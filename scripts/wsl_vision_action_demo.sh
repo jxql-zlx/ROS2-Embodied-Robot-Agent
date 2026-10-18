@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless Vision -> Language -> Action demo:
 #   Gazebo cup world + vision node (YOLO) + robot_agent (mock LLM).
-#   Sends "找杯子" and verifies the robot moves toward the detected cup.
+#   Sends "找杯子" and verifies a safe measured approach stop.
 source /opt/ros/humble/setup.bash
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,6 +10,7 @@ ROS2_DIR="$REPO_ROOT/ros2"
 AGENT_MODE="${1:-simple}"
 TASK="${2:-找杯子}"
 SCENARIO="${3:-center}"
+APPROACH_STOP_DISTANCE="${APPROACH_STOP_DISTANCE:-0.65}"
 case "$AGENT_MODE" in
   simple|hierarchical) ;;
   *) echo "usage: $0 [simple|hierarchical] [task] [scenario]"; exit 1 ;;
@@ -26,6 +27,13 @@ cd "$ROS2_DIR"
 source install/setup.bash
 source /usr/share/gazebo/setup.sh 2>/dev/null || true
 set -uo pipefail
+SAFE_STOP_DISTANCE=$(python3 - "$APPROACH_STOP_DISTANCE" <<'PY'
+import sys
+from robot_agent.approach import approach_safe_stop_distance
+
+print(approach_safe_stop_distance(float(sys.argv[1])))
+PY
+)
 
 MODELS="$ROS2_DIR/src/robot_bringup/models"
 WORLD="$ROS2_DIR/install/robot_bringup/share/robot_bringup/worlds/cup.world"
@@ -59,23 +67,27 @@ WORLD="$TEST_WORLD"
 SCAN_TOPIC=/scan
 if [ "$SCENARIO" = range_dropout ]; then SCAN_TOPIC=/approach_test/scan; fi
 MODEL="$REPO_ROOT/models/yolov8n.pt"
-LOG="/tmp/vision_action_demo_${AGENT_MODE}_${SCENARIO}.log"
+LOG_ROOT="${TMPDIR:-/tmp}/vision_action_demo"
+mkdir -p "$LOG_ROOT"
+LOG_DIR=$(mktemp -d "$LOG_ROOT/${AGENT_MODE}_${SCENARIO}.XXXXXX")
+LOG="$LOG_DIR/launch.log"
 
 export GAZEBO_MODEL_PATH="$MODELS:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI=""
 
 setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false \
-  agent_mode:="$AGENT_MODE" tool_scan_topic:="$SCAN_TOPIC" use_sim_time:=true > "$LOG" 2>&1 &
+  agent_mode:="$AGENT_MODE" tool_scan_topic:="$SCAN_TOPIC" \
+  approach_stop_distance:="$APPROACH_STOP_DISTANCE" use_sim_time:=true > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
 setsid python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
   --ros-args -p model_path:="$MODEL" -p camera_topic:=/camera/image_raw -p conf:=0.25 \
   -p use_sim_time:=true \
-  > /tmp/vision_action_node.log 2>&1 &
+  > "$LOG_DIR/vision.log" 2>&1 &
 VISION_PID=$!
 FAULT_PID=""
 if [ "$SCENARIO" = vision_dropout ] || [ "$SCENARIO" = range_dropout ]; then
-  setsid python3 "$SCRIPTS_DIR/approach_fault_injector.py" "$SCENARIO" "$VISION_PID" > /tmp/approach_fault.log 2>&1 &
+  setsid python3 "$SCRIPTS_DIR/approach_fault_injector.py" "$SCENARIO" "$VISION_PID" > "$LOG_DIR/fault.log" 2>&1 &
   FAULT_PID=$!
 fi
 
@@ -92,12 +104,15 @@ cleanup() {
   rm -f -- "$TEST_WORLD"
 }
 trap cleanup EXIT
+echo "RUN_LOG_DIR: $LOG_DIR"
 
 echo ">> waiting for topics ..."
 python3 "$SCRIPTS_DIR/wait_topic.py" /camera/image_raw sensor_msgs/msg/Image --timeout 90 \
   || { tail -60 "$LOG"; exit 1; }
 python3 "$SCRIPTS_DIR/wait_topic.py" /vision/detections std_msgs/msg/String --timeout 60 \
-  || { tail -60 /tmp/vision_action_node.log; exit 1; }
+  || { tail -60 "$LOG_DIR/vision.log"; exit 1; }
+python3 "$SCRIPTS_DIR/wait_fresh_vision.py" \
+  || { tail -60 "$LOG_DIR/vision.log"; exit 1; }
 python3 "$SCRIPTS_DIR/wait_topic.py" /odom nav_msgs/msg/Odometry --timeout 60 || exit 1
 
 echo ">> baseline pose"
@@ -112,23 +127,24 @@ else
 fi
 TASK_RESULT=$?
 echo "$TASK_OUTPUT"
-EXPECTED_RESULT=0
-case "$SCENARIO" in absent|blocked|vision_dropout|range_dropout) EXPECTED_RESULT=2 ;; esac
+EXPECTED_RESULT=2
+if [ "$SCENARIO" = cancel ]; then EXPECTED_RESULT=0; fi
 if [ "$TASK_RESULT" -ne "$EXPECTED_RESULT" ]; then
-  echo "FAIL: approach task did not complete successfully"
+  echo "FAIL: approach task exit code $TASK_RESULT; expected $EXPECTED_RESULT"
   tail -30 "$LOG"
   exit 1
 fi
 
 POST_TASK=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo ">> checking robot remains stopped ..."
-sleep 2
+python3 "$SCRIPTS_DIR/verify_stop_window.py" || exit 1
+sleep 1
 
 echo ">> final pose"
 FINAL=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 echo "$FINAL"
 
-python3 - "$BASELINE" "$FINAL" "$TASK_OUTPUT" "$SCENARIO" "$POST_TASK" <<'PY'
+python3 - "$BASELINE" "$FINAL" "$TASK_OUTPUT" "$SCENARIO" "$POST_TASK" "$SAFE_STOP_DISTANCE" <<'PY'
 import json
 import math
 import re
@@ -136,8 +152,8 @@ import sys
 
 
 def parse(line):
-    m = re.search(r"x=([-\d.]+) y=([-\d.]+)", line)
-    return (float(m.group(1)), float(m.group(2))) if m else None
+    m = re.search(r"x=([-\d.]+) y=([-\d.]+) yaw=([-\d.]+)", line)
+    return tuple(map(float, m.groups())) if m else None
 
 
 b = parse(sys.argv[1])
@@ -151,12 +167,10 @@ print(f"displacement={dist:.3f} m (threshold=0.05)")
 post = parse(sys.argv[5])
 if post is None or math.hypot(f[0] - post[0], f[1] - post[1]) > 0.02:
     raise SystemExit("FAIL: robot kept moving after task completion")
-final_yaw = float(re.search(r"yaw=([-\d.]+)", sys.argv[2]).group(1))
-post_yaw = float(re.search(r"yaw=([-\d.]+)", sys.argv[5]).group(1))
-yaw_change = math.atan2(math.sin(final_yaw - post_yaw), math.cos(final_yaw - post_yaw))
-if abs(yaw_change) > 0.03:
+if abs(math.atan2(math.sin(f[2] - post[2]), math.cos(f[2] - post[2]))) > 0.03:
     raise SystemExit("FAIL: robot kept rotating after task completion")
 scenario = sys.argv[4]
+safe_stop_distance = float(sys.argv[6])
 if scenario == "cancel":
     if "PASS: cancellation" not in sys.argv[3]:
         raise SystemExit("FAIL: cancellation check did not report success")
@@ -176,15 +190,23 @@ action_line = next((line for line in sys.argv[3].splitlines() if line.startswith
 data = json.loads(action_line.split(":", 1)[1]) if action_line else {}
 if isinstance(data, list):
     approaches = [entry["data"]["approach"] for entry in data
-                  if entry.get("success") and "approach" in entry.get("data", {})]
+                  if "approach" in entry.get("data", {})]
     data = approaches[-1] if approaches else {}
 clearance = data.get("clearance", data)
 distance = clearance.get("distance")
-if dist >= 0.05 and clearance.get("available") and isinstance(distance, (int, float)) and 0.4 <= distance <= 0.65:
-    yaw = final_yaw
-    if scenario in ("left", "right") and yaw * (1 if scenario == "left" else -1) < 0.1:
+valid_clearance = (clearance.get("available") is True and isinstance(distance, (int, float))
+                   and 0.4 <= distance <= safe_stop_distance)
+if valid_clearance:
+    if (data.get("target_arrival_confirmed") is not False or
+            data.get("stop_confirmation_type") != "control_ack" or
+            data.get("physical_stop_confirmed") is not False or
+            not data.get("stop_command_id") or
+            data.get("approach_state") not in ("safe_stop_boundary_reached", "clearance_below_stop_distance")):
+        raise SystemExit("FAIL: approach result overstated target arrival or physical stop")
+    yaw_change = math.atan2(math.sin(f[2] - b[2]), math.cos(f[2] - b[2]))
+    if scenario in ("left", "right") and yaw_change * (1 if scenario == "left" else -1) < 0.1:
         raise SystemExit("FAIL: robot did not turn toward the side target")
-    print(f"PASS: approach completed at measured standoff {distance:.3f} m")
+    print(f"PASS: safe stopping clearance={distance:.3f}m; displacement={dist:.3f}m")
     sys.exit(0)
 print(f"FAIL: movement or final range invalid: {distance}")
 sys.exit(2)

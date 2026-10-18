@@ -72,6 +72,15 @@ class TestFlashExecutor(unittest.TestCase):
         self.assertEqual(result.data["stage_end_pose"], {"x": 0.0, "y": 0.0, "yaw": 0.0})
         self.assertEqual(result.data["navigation_goal_id"], "nav-goal-uuid")
 
+    def test_vision_stage_does_not_inherit_previous_navigation_goal_uuid(self):
+        robot = _EvidenceRobot()
+        result = FlashExecutor(robot_tool=robot, vision_tool=_PayloadVision({
+            "found": True,
+            "objects": [],
+            "stale": True,
+        })).execute(Task(id=2, tool="vision", action="find_object", target="cup"), {})
+        self.assertNotIn("navigation_goal_id", result.data)
+
     def test_navigation_failure_is_not_reported_as_success(self):
         robot = _Robot(nav_result=False)
         result = FlashExecutor(robot_tool=robot).execute(

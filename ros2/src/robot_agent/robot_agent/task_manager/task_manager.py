@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Dict, List, Optional
 
-from robot_agent.planner.task_schema import Plan, Task, validate_plan
+from robot_agent.planner.task_schema import Plan, Task, validate_plan, validate_task
 from robot_agent.task_manager.scheduler import Scheduler
 from robot_agent.task_manager.task_state import TaskStatus
 
@@ -16,7 +16,8 @@ class TaskManager:
         self._scheduler = scheduler or Scheduler()
 
     def add_task(self, task: Task) -> None:
-        self._tasks[task.id] = task
+        validate_task(task)
+        self._tasks[task.id] = deepcopy(task)
 
     def add_plan(self, plan: Plan) -> None:
         validate_plan(plan)

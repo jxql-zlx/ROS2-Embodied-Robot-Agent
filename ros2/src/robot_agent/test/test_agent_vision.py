@@ -144,9 +144,11 @@ class TestAgentApproachRouting(unittest.TestCase):
         robot = _LoopRobotTool(distances=[1.0, 0.6])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
         ok, response, action_json = self.agent.handle_task("帮我找杯子")
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         self.assertEqual(robot.actions[0]["action"], "move")
-        self.assertIn("停止距离", response)
+        self.assertIn("目标到达未确认", response)
+        self.assertIn('"target_arrival_confirmed": false', action_json)
+        self.assertIn('"stop_confirmation_type": "control_ack"', action_json)
 
     def test_approach_no_target_does_not_move(self):
         vision = _FakeVisionTool(found=False)
@@ -219,7 +221,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertEqual(len(robot.actions), 2)
         self.assertEqual(robot.actions[-1]["action"], "stop")
 
-    def test_approach_succeeds_at_measured_standoff_distance(self):
+    def test_approach_reports_unconfirmed_arrival_at_measured_standoff_distance(self):
         scenes = [
             {"found": True, "observed_at": stamp, "objects": [
                 {"name": "cup", "direction": "center"}
@@ -228,8 +230,8 @@ class TestAgentApproachRouting(unittest.TestCase):
         robot = _LoopRobotTool(distances=[1.0, 0.6])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_LoopVisionTool(scenes))
         ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
-        self.assertTrue(ok)
-        self.assertIn("停止距离", response)
+        self.assertFalse(ok)
+        self.assertIn("目标到达未确认", response)
         self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
 
     def test_approach_does_not_move_without_range_feedback(self):
@@ -256,9 +258,14 @@ class TestAgentApproachRouting(unittest.TestCase):
         ]} for stamp in (1, 2)]
         robot = _LoopRobotTool(distances=[0.8, 0.62])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_LoopVisionTool(scenes))
-        ok, _, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
-        self.assertTrue(ok)
+        ok, response, action_json = self.agent._handle_approach(
+            ActionPlan("approach", goal="cup"), "找杯子"
+        )
+        self.assertFalse(ok)
+        self.assertIn("目标到达未确认", response)
+        self.assertIn('"approach_state": "clearance_below_stop_distance"', action_json)
         self.assertAlmostEqual(robot.actions[0]["duration"], (0.8 - 0.65 - 0.08 - 0.3 * 0.1) / 0.3)
+        self.assertEqual(robot.actions[-1]["action"], "stop")
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ print(scene.to_json())
 ros2 launch robot_bringup demo.launch.py
 # 另开终端：
 source ros2/install/setup.bash
-python3 vision/ros2_vision_node.py
+python3 vision/ros2_vision_node.py --ros-args -p use_sim_time:=true
 ros2 topic echo /vision/detections
 ```
 

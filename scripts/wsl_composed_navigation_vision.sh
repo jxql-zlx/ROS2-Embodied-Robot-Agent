@@ -118,6 +118,13 @@ APPROACH_STOP_DISTANCE=0.65
 if [ "$SCENARIO" = vision_dropout ] || [ "$SCENARIO" = range_dropout ]; then
   APPROACH_STOP_DISTANCE=0.4
 fi
+SAFE_STOP_DISTANCE=$(python3 - "$APPROACH_STOP_DISTANCE" <<'PY'
+import sys
+from robot_agent.approach import approach_safe_stop_distance
+
+print(approach_safe_stop_distance(float(sys.argv[1])))
+PY
+)
 if [ "$SCENARIO" = range_dropout ]; then SCAN_TOPIC=/approach_test/scan; fi
 setsid ros2 run robot_agent robot_agent_node --ros-args -p mode:=hierarchical \
   -p use_sim_time:=true \
@@ -137,6 +144,7 @@ fi
 
 python3 "$SCRIPTS_DIR/wait_topic.py" /camera/image_raw sensor_msgs/msg/Image --timeout 90
 python3 "$SCRIPTS_DIR/wait_topic.py" /vision/detections std_msgs/msg/String --timeout 60
+python3 "$SCRIPTS_DIR/wait_fresh_vision.py"
 wait_service /task_execute
 
 case "$SCENARIO" in
@@ -158,7 +166,7 @@ case "$SCENARIO" in
     ;;
   *)
     TASK="导航到 0.2,0,0，然后找杯子并靠近"
-    expected_rc=0
+    expected_rc=2
     ;;
 esac
 echo "SCENARIO=$SCENARIO TASK=$TASK"
@@ -176,7 +184,7 @@ if [ "$task_rc" -ne "$expected_rc" ]; then
   exit 1
 fi
 
-python3 - "$SCENARIO" "$LOG_DIR/task.log" "$LOG_DIR/stages" <<'PY'
+python3 - "$SCENARIO" "$LOG_DIR/task.log" "$LOG_DIR/stages" "$SAFE_STOP_DISTANCE" <<'PY'
 import json
 import math
 import pathlib
@@ -184,7 +192,8 @@ import re
 import sys
 import time
 
-scenario, task_log, output_dir = sys.argv[1:]
+scenario, task_log, output_dir = sys.argv[1:4]
+safe_stop_distance = float(sys.argv[4])
 text = pathlib.Path(task_log).read_text(encoding="utf-8")
 line = next((line.partition(":")[2].strip() for line in text.splitlines()
              if line.startswith("action_json:")), None)
@@ -206,8 +215,11 @@ for result in results:
     )
 
 if scenario == "success":
-    if len(results) != 3 or not all(item.get("success") for item in results):
-        raise SystemExit(f"FAIL: expected three successful stages, got {results}")
+    if (len(results) != 3 or
+            [item.get("task_id") for item in results] != [1, 2, 3] or
+            not results[0].get("success") or not results[1].get("success") or
+            results[2].get("success")):
+        raise SystemExit(f"FAIL: expected nav and vision success followed by safe-stop approach failure, got {results}")
     detected = results[1].get("data", {}).get("vision", {})
     if (not detected.get("found") or not detected.get("objects") or
             not any(obj.get("name", "").lower() == "cup" for obj in detected["objects"])):
@@ -222,11 +234,14 @@ if scenario == "success":
     approach = results[2].get("data", {}).get("approach", {})
     clearance = approach.get("clearance", approach)
     distance = clearance.get("distance")
-    if not clearance.get("available") or not isinstance(distance, (int, float)) or not 0.4 <= distance <= 0.79:
+    if (clearance.get("available") is not True or not isinstance(distance, (int, float))
+            or not 0.4 <= distance <= safe_stop_distance):
         raise SystemExit(f"FAIL: approach did not verify the safe stopping clearance: {approach}")
     if (approach.get("target_arrival_confirmed") is not False or
             approach.get("stop_confirmation_type") != "control_ack" or
-            approach.get("physical_stop_confirmed") is not False):
+            approach.get("physical_stop_confirmed") is not False or
+            not approach.get("stop_command_id") or
+            approach.get("approach_state") not in ("safe_stop_boundary_reached", "clearance_below_stop_distance")):
         raise SystemExit(f"FAIL: approach stop evidence is incomplete or overstated: {approach}")
     for stage in results[:3]:
         data = stage.get("data", {})
@@ -234,8 +249,11 @@ if scenario == "success":
             raise SystemExit(f"FAIL: stage {stage.get('task_id')} lacks start/end pose evidence: {data}")
     if not results[0].get("data", {}).get("navigation_goal_id"):
         raise SystemExit("FAIL: navigation stage lacks a Nav2 goal UUID")
-    if not results[2].get("data", {}).get("last_command_id"):
-        raise SystemExit("FAIL: approach stage lacks a correlated motion command UUID")
+    executed = approach.get("executed_motions")
+    motion_id = approach.get("motion_command_id")
+    if (not isinstance(executed, list) or not executed or not motion_id or
+            executed[-1].get("command_id") != motion_id or not approach.get("stop_command_id")):
+        raise SystemExit("FAIL: approach motion and stop command UUIDs are not correlated")
 elif scenario == "navigation_failure":
     if (len(results) != 2 or results[0].get("task_id") != 1 or
             results[0].get("success") or results[-1].get("task_id") != -1):
@@ -279,6 +297,10 @@ print(f"PASS: {scenario}; stage logs: {out}")
 PY
 
 POST_TASK=$(python3 "$SCRIPTS_DIR/odom_pose.py")
+python3 "$SCRIPTS_DIR/verify_stop_window.py" || {
+  echo "Logs retained in: $LOG_DIR"
+  exit 1
+}
 sleep 1
 FINAL=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 python3 - "$SCENARIO" "$BASELINE" "$POST_TASK" "$FINAL" <<'PY'

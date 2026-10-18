@@ -48,6 +48,7 @@ def generate_launch_description() -> LaunchDescription:
                 "mode": LaunchConfiguration("agent_mode"),
                 "agent_config": LaunchConfiguration("agent_config"),
                 "tool_scan_topic": LaunchConfiguration("tool_scan_topic"),
+                "approach_stop_distance": LaunchConfiguration("approach_stop_distance"),
                 "cancel_service": LaunchConfiguration("cancel_service"),
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
             }
@@ -65,6 +66,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("agent_mode", default_value="simple"),
             DeclareLaunchArgument("agent_config", default_value=default_agent_config),
             DeclareLaunchArgument("tool_scan_topic", default_value="/scan"),
+            DeclareLaunchArgument("approach_stop_distance", default_value="0.65"),
             DeclareLaunchArgument("cancel_service", default_value="/task_cancel"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             sim,

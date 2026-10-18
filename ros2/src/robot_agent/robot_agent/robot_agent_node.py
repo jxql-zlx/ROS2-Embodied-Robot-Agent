@@ -203,6 +203,16 @@ class RobotAgentNode(Node):
             elif self._cancellation_pending and self._cancellation_explicit:
                 requested_generation = self._cancellation_owner_generation
                 lease = self._cancellation_lease
+                if self._cancellation_stop_confirmed:
+                    # A duplicate cancel for the same lease is idempotent.
+                    # The execution thread may still be unwinding, so leave
+                    # admission closed and avoid publishing another stop.
+                    return True, "停止已收到控制层确认；任务执行线程仍在退出", json.dumps({
+                        "action": "stop",
+                        "stop_confirmation_type": "control_ack",
+                        "physical_stop_confirmed": False,
+                        "task_execution_converged": self._active_cancel_event is None,
+                    }, ensure_ascii=False)
             elif self._cancellation_pending:
                 # Promote a stop initiated by an ordinary motion/approach
                 # failure into an explicit cancellation lease. The earlier

@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from collections import OrderedDict
 from threading import Condition, Event
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,12 @@ class TestFrontRange(unittest.TestCase):
     @staticmethod
     def _tool():
         tool = object.__new__(Ros2RobotTool)
+        tool._status_condition = Condition()
+        tool._status_history = OrderedDict()
+        tool._latest_status = None
+        tool._latest_status_received_at = None
+        tool._status_clock_epoch = 0
+        tool._last_status_ros_now_ns = None
         tool._scan_condition = Condition()
         tool._scan_history = []
         tool._last_scan_stamp_ns = None
@@ -123,7 +130,7 @@ class TestFrontRange(unittest.TestCase):
         self.assertEqual(len(tool._scan_history), 1)
 
     @patch.object(Ros2RobotTool, "_ros_time_ns", return_value=1_000_000_000)
-    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 0.1])
+    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 1.0, 1.1])
     def test_wait_ignores_braking_scan_and_requires_stable_later_scans(self, _mono, _ros_clock):
         tool = self._tool()
         tool._scan_condition = MagicMock()
@@ -150,7 +157,7 @@ class TestFrontRange(unittest.TestCase):
         self.assertFalse(tool.wait_for_front_range()["available"])
 
     @patch.object(Ros2RobotTool, "_ros_time_ns", return_value=1_000_000_000)
-    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 0.1])
+    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 1.5, 1.6])
     def test_wait_does_not_accept_stable_near_blind_zone_echo(self, _mono, _ros_clock):
         tool = self._tool()
         tool._latest_scan = self.scan()
@@ -167,6 +174,29 @@ class TestFrontRange(unittest.TestCase):
         tool._scan_condition.wait.side_effect = receive_scans
         result = tool.wait_for_front_range()
         self.assertEqual(result["distance"], 0.81)
+
+    @patch.object(Ros2RobotTool, "_ros_time_ns", return_value=1_000_000_000)
+    @patch("robot_tools.ros2_robot_tool.time.monotonic", side_effect=[0.0, 10.2])
+    def test_paused_ros_clock_does_not_keep_old_received_scans_fresh(self, _mono, _ros_clock):
+        tool = self._tool()
+        tool._scan_condition = MagicMock()
+        tool._scan_history = [
+            (0.6, 0.81, 900_000_000), (0.7, 0.82, 950_000_000),
+            (0.8, 0.81, 1_000_000_000),
+        ]
+        self.assertFalse(tool.wait_for_front_range(timeout_sec=1.0)["available"])
+
+    def test_clock_jump_callback_clears_scan_session(self):
+        tool = self._tool()
+        scan = self.scan()
+        scan.header.stamp.sec = 1
+        tool._latest_scan = scan
+        tool._latest_scan_stamp_ns = 1_000_000_000
+        tool._last_scan_stamp_ns = 1_000_000_000
+        tool._scan_history.append((1.0, 0.8, 1_000_000_000))
+        tool._on_ros_clock_jump(None)
+        self.assertIsNone(tool._latest_scan)
+        self.assertEqual(len(tool._scan_history), 0)
 
     def test_cancelled_wait_returns_without_scans(self):
         tool = object.__new__(Ros2RobotTool)

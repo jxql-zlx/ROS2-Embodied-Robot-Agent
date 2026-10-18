@@ -59,6 +59,7 @@ class FlashExecutor(BaseExecutor):
                 return TaskResult(task.id, False, "任务已取消", {"cancelled": True, "recoverable": False})
             start_pose = self._pose_snapshot()
             start_command_id = getattr(self._robot, "latest_command_id", None)
+            start_navigation_goal_id = getattr(self._robot, "last_navigation_goal_id", None)
             if task.tool == "vision":
                 result = self._run_vision(task)
             elif task.tool == "robot":
@@ -84,10 +85,13 @@ class FlashExecutor(BaseExecutor):
             if end_pose is not None:
                 stage_evidence["stage_end_pose"] = end_pose
             goal_id = getattr(self._robot, "last_navigation_goal_id", None)
-            if goal_id:
+            # A vision/approach stage can follow navigation in the same task.
+            # Do not attribute that earlier goal UUID to this stage.
+            if goal_id and (task.action == "navigate" or goal_id != start_navigation_goal_id):
                 stage_evidence["navigation_goal_id"] = goal_id
             command_id = getattr(self._robot, "latest_command_id", None)
-            if command_id and command_id != start_command_id:
+            if (command_id and command_id != start_command_id
+                    and not isinstance(result.data.get("approach"), dict)):
                 stage_evidence["last_command_id"] = command_id
             if stage_evidence:
                 result.data.update(stage_evidence)

@@ -540,6 +540,7 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertTrue(stop_response.success)
         self.assertIn("已取消", stop_response.response)
         self.assertEqual(self.robot.actions, [{"action": "stop"}])
+        self.assertNotIn("new-stop-request-uuid", self.agent._task_id_history)
 
         self.llm.release.set()
         active_response = self._wait(active_future)
@@ -607,6 +608,80 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertTrue(cancelled[0])
         self.assertFalse(result[0][0])
         self.assertEqual([action["action"] for action in self.robot.actions], ["move", "stop"])
+
+    def test_explicit_cancel_during_automatic_stop_confirmation_owns_gate(self):
+        self.llm.release.set()
+        self.robot.wait_result = False
+        automatic_stop_waiting = threading.Event()
+        release_automatic_wait = threading.Event()
+        original_wait = self.robot.wait_for_stop_confirmation
+
+        def wait_for_stop(stamp, timeout_sec=2.0, command_id=None):
+            if command_id == "test-stop-2":
+                automatic_stop_waiting.set()
+                self.assertTrue(release_automatic_wait.wait(2.0))
+            return original_wait(stamp, timeout_sec, command_id)
+
+        self.robot.wait_for_stop_confirmation = wait_for_stop
+        active_result = []
+        active_thread = threading.Thread(
+            target=lambda: active_result.append(self.agent.handle_task("前进"))
+        )
+        active_thread.start()
+        self.assertTrue(self.robot.wait_entered.wait(2.0))
+        self.assertTrue(automatic_stop_waiting.wait(2.0), "automatic stop did not reach confirmation")
+
+        cancel_result = self.agent._cancel_active_task()
+        self.assertTrue(cancel_result[0])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertEqual(
+            [action["action"] for action in self.robot.actions],
+            ["move", "stop", "stop"],
+        )
+
+        release_automatic_wait.set()
+        active_thread.join(2.0)
+        self.assertFalse(active_thread.is_alive())
+        self.assertFalse(active_result[0][0])
+        self.assertFalse(self.agent._cancellation_pending)
+
+    def test_duplicate_cancel_after_stop_confirmation_does_not_publish_again(self):
+        task_id = "duplicate-cancel-id"
+        self.agent._active_task_id = task_id
+        self.agent._active_cancel_event = threading.Event()
+        self.agent._active_task_done = threading.Event()
+        first = self.agent._cancel_active_task(task_id)
+        self.assertTrue(first[0])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertTrue(self.agent._cancellation_stop_confirmed)
+        self.assertEqual(self.robot.actions, [{"action": "stop"}])
+
+        duplicate = self.agent._cancel_active_task(task_id)
+        self.assertTrue(duplicate[0])
+        self.assertIn("仍在退出", duplicate[1])
+        self.assertEqual(self.robot.actions, [{"action": "stop"}])
+
+    def test_scoped_cancel_retry_after_failed_confirmation_keeps_same_uuid(self):
+        task_id = "deadline-retry-id"
+        self.agent._task_generation = 1
+        self.agent._active_task_id = task_id
+        self.agent._active_cancel_event = threading.Event()
+        self.agent._active_task_done = threading.Event()
+        with patch.object(self.robot, "wait_for_stop_confirmation", return_value=False):
+            first = self.agent._cancel_active_task(task_id)
+        self.assertFalse(first[0])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+        with self.agent._task_guard:
+            self.agent._active_cancel_event = None
+            self.agent._active_task_done.set()
+            self.agent._active_task_done = None
+            self.agent._active_task_id = None
+        self.robot.wait_for_stop_confirmation = lambda *_args, **_kwargs: True
+        retry = self.agent._cancel_active_task(task_id)
+        self.assertTrue(retry[0])
+        self.assertFalse(self.agent._cancellation_pending)
 
 
 if __name__ == "__main__":

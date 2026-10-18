@@ -58,8 +58,17 @@ def main() -> int:
             print(f"task_id    : {request.task_id}")
             future = client.call_async(request)
             rclpy.spin_until_future_complete(node, future, timeout_sec=args.timeout)
-            if not future.done() or future.result() is None:
-                print(f"ERROR: task {request.task_id} timed out; requesting cancellation")
+            task_result = None
+            task_call_error = ""
+            if future.done():
+                try:
+                    task_result = future.result()
+                except Exception as exc:
+                    task_call_error = str(exc)
+            if not future.done() or task_result is None:
+                reason = (f"service result failed: {task_call_error}" if task_call_error
+                          else "deadline expired or service returned no result")
+                print(f"ERROR: task {request.task_id} state unknown ({reason}); requesting cancellation")
                 cancel_client = node.create_client(CancelTask, "/task_cancel")
                 if not cancel_client.wait_for_service(timeout_sec=3.0):
                     print("ERROR: cancellation service unavailable; task may still be running")
@@ -70,13 +79,23 @@ def main() -> int:
                 rclpy.spin_until_future_complete(
                     node, cancel_future, timeout_sec=CANCEL_CALL_TIMEOUT_SEC
                 )
-                if not cancel_future.done() or cancel_future.result() is None:
+                if not cancel_future.done():
                     print("ERROR: cancellation result unknown; task may still be running")
                 else:
-                    cancel_result = cancel_future.result()
-                    print(f"cancellation : {cancel_result.success} ({cancel_result.response})")
+                    try:
+                        cancel_result = cancel_future.result()
+                    except Exception as exc:
+                        print(f"ERROR: cancellation result unknown ({exc}); task may still be running")
+                    else:
+                        if cancel_result is None:
+                            print("ERROR: cancellation result unknown; task may still be running")
+                        else:
+                            print(
+                                f"cancellation : success={cancel_result.success} "
+                                f"({cancel_result.response})"
+                            )
                 return 1
-            result = future.result()
+            result = task_result
             print(f"success    : {result.success}")
             print(f"response   : {result.response}")
             print(f"action_json: {result.action_json}")

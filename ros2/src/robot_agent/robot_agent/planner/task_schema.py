@@ -167,51 +167,56 @@ def _finite_tree(value: Any) -> bool:
     return False
 
 
+def validate_task(task: Task) -> None:
+    """Validate one task before it enters a manager or executor."""
+    if not isinstance(task, Task):
+        raise PlanValidationError("task must be a Task object")
+    if isinstance(task.id, bool) or not isinstance(task.id, int) or task.id <= 0:
+        raise PlanValidationError("task ids must be positive integers")
+    allowed = {
+        "nav": {"navigate"},
+        "vision": {"find_object", "find", "observe", "scene", "get_objects"},
+        "robot": {"move", "rotate", "stop", "approach", "infer"},
+    }
+    if not isinstance(task.tool, str) or not isinstance(task.action, str):
+        raise PlanValidationError(f"task {task.id} tool/action must be strings")
+    if task.tool not in allowed or task.action not in allowed[task.tool]:
+        raise PlanValidationError(f"unsupported tool/action pair: {task.tool}/{task.action}")
+    if not isinstance(task.target, str) or not isinstance(task.name, str):
+        raise PlanValidationError(f"task {task.id} target/name must be strings")
+    if task.action in ("find_object", "find", "approach") and not task.target.strip():
+        raise PlanValidationError(f"task {task.id} requires a non-empty target")
+    if not isinstance(task.params, dict) or not _finite_tree(task.params):
+        raise PlanValidationError(f"task {task.id} params must contain finite JSON values")
+    _validate_task_params(task)
+    if task.status != "pending":
+        raise PlanValidationError(f"task {task.id} must start pending")
+    for field_name in ("importance", "urgency", "complexity", "dependency"):
+        value = getattr(task, field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not _is_finite_number(value):
+            raise PlanValidationError(f"task {task.id} {field_name} must be finite")
+        if not 0 <= value <= 100:
+            raise PlanValidationError(f"task {task.id} {field_name} must be between 0 and 100")
+    if not isinstance(task.depends_on, list) or any(
+        isinstance(dep, bool) or not isinstance(dep, int) for dep in task.depends_on
+    ):
+        raise PlanValidationError(f"task {task.id} depends_on must contain integer ids")
+    if len(set(task.depends_on)) != len(task.depends_on) or task.id in task.depends_on:
+        raise PlanValidationError(f"task {task.id} has duplicate or self dependencies")
+
+
 def validate_plan(plan: Plan) -> None:
     """Validate a plan before it can enter TaskManager or reach an executor."""
     if not isinstance(plan, Plan) or not isinstance(plan.goal, str) or not plan.goal.strip():
         raise PlanValidationError("plan goal must be a non-empty string")
     if not isinstance(plan.tasks, list) or not 1 <= len(plan.tasks) <= 64:
         raise PlanValidationError("plan must contain between 1 and 64 tasks")
-    allowed = {
-        "nav": {"navigate"},
-        "vision": {"find_object", "find", "observe", "scene", "get_objects"},
-        "robot": {"move", "rotate", "stop", "approach", "infer"},
-    }
     ids = []
     by_id = {}
     for task in plan.tasks:
-        if not isinstance(task, Task):
-            raise PlanValidationError("plan tasks must be Task objects")
-        if isinstance(task.id, bool) or not isinstance(task.id, int) or task.id <= 0:
-            raise PlanValidationError("task ids must be positive integers")
+        validate_task(task)
         if task.id in by_id:
             raise PlanValidationError(f"duplicate task id: {task.id}")
-        if not isinstance(task.tool, str) or not isinstance(task.action, str):
-            raise PlanValidationError(f"task {task.id} tool/action must be strings")
-        if task.tool not in allowed or task.action not in allowed[task.tool]:
-            raise PlanValidationError(f"unsupported tool/action pair: {task.tool}/{task.action}")
-        if not isinstance(task.target, str) or not isinstance(task.name, str):
-            raise PlanValidationError(f"task {task.id} target/name must be strings")
-        if task.action in ("find_object", "find", "approach") and not task.target.strip():
-            raise PlanValidationError(f"task {task.id} requires a non-empty target")
-        if not isinstance(task.params, dict) or not _finite_tree(task.params):
-            raise PlanValidationError(f"task {task.id} params must contain finite JSON values")
-        _validate_task_params(task)
-        if task.status != "pending":
-            raise PlanValidationError(f"task {task.id} must start pending")
-        for field_name in ("importance", "urgency", "complexity", "dependency"):
-            value = getattr(task, field_name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not _is_finite_number(value):
-                raise PlanValidationError(f"task {task.id} {field_name} must be finite")
-            if not 0 <= value <= 100:
-                raise PlanValidationError(f"task {task.id} {field_name} must be between 0 and 100")
-        if not isinstance(task.depends_on, list) or any(
-            isinstance(dep, bool) or not isinstance(dep, int) for dep in task.depends_on
-        ):
-            raise PlanValidationError(f"task {task.id} depends_on must contain integer ids")
-        if len(set(task.depends_on)) != len(task.depends_on) or task.id in task.depends_on:
-            raise PlanValidationError(f"task {task.id} has duplicate or self dependencies")
         ids.append(task.id)
         by_id[task.id] = task
     known = set(ids)

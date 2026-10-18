@@ -2,12 +2,22 @@
 
 import unittest
 
-from robot_agent.planner.task_schema import Plan, Task
+from robot_agent.planner.task_schema import Plan, PlanValidationError, Task
 from robot_agent.task_manager.task_manager import TaskManager
 from robot_agent.task_manager.task_state import TaskStatus
 
 
 class TestTaskManager(unittest.TestCase):
+    def test_direct_task_addition_is_validated_and_copied(self):
+        manager = TaskManager()
+        with self.assertRaises(PlanValidationError):
+            manager.add_task(Task(id=1, tool="robot", action="approach"))
+
+        task = Task(id=1, tool="robot", action="stop")
+        manager.add_task(task)
+        task.action = "navigate"
+        self.assertEqual(manager.tasks()[0].action, "stop")
+
     def test_dependent_task_waits_for_prerequisite(self):
         manager = TaskManager()
         manager.add_plan(

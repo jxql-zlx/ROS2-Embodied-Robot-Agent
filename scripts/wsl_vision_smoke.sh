@@ -37,13 +37,15 @@ python3 "$SCRIPTS_DIR/wait_topic.py" /camera/image_raw sensor_msgs/msg/Image --t
 
 echo ">> launching vision node (YOLO, local weights) ..."
 python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
-  --ros-args -p model_path:="$MODEL" -p camera_topic:=/camera/image_raw -p conf:=0.25 \
+  --ros-args -p use_sim_time:=true -p model_path:="$MODEL" -p camera_topic:=/camera/image_raw -p conf:=0.25 \
   > /tmp/vision_node.log 2>&1 &
 VISION_PID=$!
 
 echo ">> waiting for /vision/detections ..."
 python3 "$SCRIPTS_DIR/wait_topic.py" /vision/detections std_msgs/msg/String --timeout 60 \
   || { echo "FAIL: /vision/detections never appeared"; echo '--- vision node log ---'; tail -60 /tmp/vision_node.log; tail -40 "$LOG"; exit 1; }
+python3 "$SCRIPTS_DIR/wait_fresh_vision.py" \
+  || { echo 'FAIL: no verified fresh camera timestamp'; tail -60 /tmp/vision_node.log; exit 1; }
 
 echo ">> grabbing one detection message ..."
 python3 - <<'PY'

@@ -175,10 +175,12 @@ class TestHierarchicalAgent(unittest.TestCase):
         results = agent.run(goal, context={
             "_navigate": lambda target, _timeout: events.append(("navigate", target)) or True,
         })
-        self.assertTrue(all(result.success for result in results), [r.message for r in results])
+        self.assertEqual([result.success for result in results], [True, True, False])
         self.assertEqual(events[0], ("navigate", "1.0,0.5"))
         self.assertEqual(events[1], "find")
         self.assertTrue(any(action.get("action") == "move" for action in robot.actions))
+        self.assertEqual(results[-1].data["approach"]["approach_state"], "clearance_below_stop_distance")
+        self.assertFalse(results[-1].data["approach"]["target_arrival_confirmed"])
 
     def test_navigation_failure_prevents_following_find_and_approach(self):
         robot = _FakeRobotTool()
@@ -331,7 +333,8 @@ class TestHierarchicalAgent(unittest.TestCase):
         self.assertTrue(results)
         self.assertEqual(vision.last_query, ("find", "cup"))
         self.assertTrue(any(a.get("action") == "move" for a in robot.actions))
-        self.assertTrue(all(r.success for r in results))
+        self.assertFalse(all(r.success for r in results))
+        self.assertEqual(results[-1].data["approach"]["approach_state"], "clearance_below_stop_distance")
 
     def test_simple_stop_goes_straight_to_flash(self):
         robot = _FakeRobotTool()
@@ -345,10 +348,12 @@ class TestHierarchicalAgent(unittest.TestCase):
         robot = _FakeRobotTool()
         agent = build_hierarchical_agent(robot_tool=robot, vision_tool=_FakeVisionTool())
         results = agent.run("找杯子")
-        self.assertTrue(all(r.success for r in results))
+        self.assertFalse(all(r.success for r in results))
         approach = results[-1].data["approach"]
-        self.assertEqual(approach["clearance"]["distance"], 0.6)
+        clearance = approach.get("clearance", approach)
+        self.assertEqual(clearance["distance"], 0.6)
         self.assertFalse(approach["target_arrival_confirmed"])
+        self.assertEqual(approach["approach_state"], "clearance_below_stop_distance")
         self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
 
     def test_range_failure_does_not_trigger_blind_search_rotation(self):

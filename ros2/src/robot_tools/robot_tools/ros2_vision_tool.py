@@ -8,6 +8,7 @@ camera driver directly, keeping perception decoupled from planning.
 from __future__ import annotations
 
 import json
+import math
 import time
 from threading import Condition
 from typing import Any, Dict, Optional
@@ -98,17 +99,22 @@ class Ros2VisionTool(Node):
         """Query one scene snapshot, including its matching freshness metadata."""
         fresh, age = self._freshness(scene, time.time(), self._max_age_sec)
         if not fresh:
+            source_status = (scene or {}).get("source_time_status", "unknown")
             return {
                 "found": False,
                 "objects": [],
                 "stale": True,
                 "age_sec": round(age, 3) if age is not None else None,
+                "source_time_status": source_status,
+                "freshness_status": source_status if source_status != "verified" else "stale",
             }
         result = self._find(scene, object_name, min_confidence)
         result.update({
             "stale": False,
             "age_sec": round(age, 3),
             "observed_at": float(scene["observed_at"]),
+            "source_time_status": scene["source_time_status"],
+            "source_stamp_ns": int(scene["source_stamp_ns"]),
         })
         return result
 
@@ -116,14 +122,24 @@ class Ros2VisionTool(Node):
     def _freshness(
         scene: Optional[Dict[str, Any]], now: float, max_age_sec: float
     ) -> tuple[bool, Optional[float]]:
-        """Treat missing, invalid, future, or expired timestamps as stale."""
+        """Require both a recent ROS source stamp and a recent wall receipt."""
+        if scene is not None and not isinstance(scene, dict):
+            return False, None
         try:
-            observed_at = float((scene or {}).get("observed_at", 0.0))
-        except (TypeError, ValueError):
+            data = scene or {}
+            observed_at = float(data.get("observed_at", 0.0))
+            source_age = float(data.get("source_age_sec"))
+            source_stamp_ns = int(data.get("source_stamp_ns"))
+        except (TypeError, ValueError, OverflowError):
             return False, None
-        if observed_at <= 0 or observed_at > now:
+        if (data.get("source_time_status") != "verified" or source_stamp_ns <= 0
+                or not math.isfinite(observed_at) or not math.isfinite(source_age)
+                or observed_at <= 0 or observed_at > now
+                or source_age < -0.1):
             return False, None
-        age = now - observed_at
+        # source_age_sec is measured in the ROS clock domain at image receipt.
+        # Add wall elapsed time since receipt to age it during inference and transport.
+        age = max(0.0, source_age + (now - observed_at))
         return age <= max_age_sec, age
 
     @staticmethod
