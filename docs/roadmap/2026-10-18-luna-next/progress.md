@@ -33,4 +33,4 @@
 - `wsl_navigation_cancel_scenarios.sh simple hierarchical` 通过：Nav2 CANCELED、控制 stop 确认、停止后 odom 窗口和后续导航均验证。
 - 组合 Gazebo 的 success、navigation_failure、target_absent、blocked、vision_dropout、range_dropout 六场景通过外层断言。成功结果保留 target_arrival_confirmed=false 和 physical_stop_confirmed=false；停车后观测由外层里程计单独核验。
 - 集成首次暴露安全制动最短步长边界低估，已将停止边界改为目标停止距离+制动余量+两个控制周期距离。重新跑单测、构建和完整 success 场景通过；失败过程记录在 validation.md。
-- 工作区交付前仍需最终 diff/status 检查，提交并推送；独立 16 项 approach 场景矩阵本轮未执行。
+- `66a2d7e fix: harden ROS2 task cancellation and approach safety` 已推送 `origin/main`，推送后检查工作区干净；独立 16 项 approach 场景矩阵本轮未执行。
