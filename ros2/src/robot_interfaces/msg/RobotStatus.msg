@@ -11,3 +11,6 @@ float32 remaining
 string message
 
 builtin_interfaces/Time stamp
+
+# Command correlation token copied from RobotCommand.
+string command_id

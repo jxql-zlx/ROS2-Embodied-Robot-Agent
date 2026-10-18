@@ -37,6 +37,28 @@ class TestFrontRange(unittest.TestCase):
         scan.ranges = [0.2, float("inf"), 0.3]
         self.assertEqual(Ros2RobotTool.front_range(scan), 12.0)
 
+    @patch("robot_tools.ros2_robot_tool.time.monotonic", return_value=2.0)
+    def test_duplicate_or_unstamped_scan_cannot_add_confirmation_sample(self, _clock):
+        tool = object.__new__(Ros2RobotTool)
+        tool._scan_condition = Condition()
+        tool._scan_history = []
+        tool._last_scan_stamp_ns = None
+        tool._latest_scan = None
+        tool._scan_received_at = 0.0
+        scan = self.scan()
+        scan.header.stamp.sec = 4
+        scan.header.stamp.nanosec = 2
+        tool._on_scan(scan)
+        self.assertEqual(len(tool._scan_history), 1)
+        tool._on_scan(scan)
+        self.assertEqual(len(tool._scan_history), 1)
+        unstamped = self.scan()
+        tool._on_scan(unstamped)
+        self.assertEqual(len(tool._scan_history), 1)
+        scan.header.stamp.nanosec = 3
+        tool._on_scan(scan)
+        self.assertEqual(len(tool._scan_history), 2)
+
     @patch("robot_tools.ros2_robot_tool.time.monotonic", return_value=10.0)
     def test_stale_scan_is_unavailable(self, _clock):
         tool = object.__new__(Ros2RobotTool)

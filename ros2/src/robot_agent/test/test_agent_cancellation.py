@@ -32,6 +32,12 @@ class _Robot:
     def __init__(self):
         self.actions = []
         self._lock = threading.Lock()
+        self._status_counter = 0
+        self.latest_command_id = "test-stop-command"
+        self.wait_result = True
+        self.stop_confirm_result = True
+        self.block_wait = False
+        self.wait_entered = threading.Event()
 
     def execute_action(self, action):
         with self._lock:
@@ -41,7 +47,23 @@ class _Robot:
     def stop(self):
         with self._lock:
             self.actions.append({"action": "stop"})
+            self._status_counter += 1
+            self.latest_command_id = f"test-stop-{self._status_counter}"
         return True
+
+    def status_stamp(self):
+        return (self._status_counter, 0)
+
+    def wait_for_motion_complete(self, _stamp, _timeout, cancel_event=None):
+        self.wait_entered.set()
+        if self.block_wait and cancel_event is not None:
+            cancel_event.wait(2.0)
+            return False
+        return self.wait_result and (cancel_event is None or not cancel_event.is_set())
+
+    def wait_for_stop_confirmation(self, stamp, timeout_sec=2.0, command_id=None):
+        self.stop_confirmation = (stamp, timeout_sec, command_id)
+        return self.stop_confirm_result
 
 
 class _Vision:
@@ -136,10 +158,13 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertEqual(self.robot.actions, [{"action": "stop"}])
         self.robot.actions.clear()
         self.agent._set_navigation_unresolved(False)
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+        self.assertTrue(self.agent._cancel_active_task()[0])
         response = self.agent.handle_task("前进")
         self.assertTrue(response[0])
 
-    def test_late_navigation_terminal_result_sends_final_stop_before_reopening(self):
+    def test_late_navigation_terminal_result_requires_explicit_confirmed_stop_retry(self):
         self.agent._set_navigation_unresolved(True)
 
         cancel_result = self.agent._cancel_active_task()
@@ -148,9 +173,14 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertTrue(self.agent._cancellation_pending)
         self.assertEqual(self.robot.actions, [{"action": "stop"}])
 
-        # A late Nav2 terminal callback must close the cancellation lease with
-        # a final stop before it clears the admission gate.
+        # A late Nav2 terminal callback records the terminal state but never
+        # clears the admission gate automatically.
         self.agent._set_navigation_unresolved(False)
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertEqual(self.robot.actions, [{"action": "stop"}])
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+        retry_result = self.agent._cancel_active_task()
+        self.assertTrue(retry_result[0])
         self.assertFalse(self.agent._cancellation_pending)
         self.assertEqual(self.robot.actions, [{"action": "stop"}, {"action": "stop"}])
         self.agent._run_task = lambda *_args: (True, "done", "")
@@ -163,13 +193,16 @@ class TestAgentCancellation(unittest.TestCase):
             self.assertFalse(cancel_result[0])
             self.assertTrue(self.agent._cancellation_pending)
 
-            # The late terminal callback cannot release the lease if its
-            # required final stop command fails.
-            self.agent._set_navigation_unresolved(False)
-            self.assertTrue(self.agent._cancellation_pending)
-            self.assertFalse(self.agent.handle_task("follow-up")[0])
+        # The late terminal callback cannot release the lease itself.
+        self.agent._set_navigation_unresolved(False)
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
 
-            # A repeated cancel retries stop and then releases the stale lease.
+        with patch.object(self.robot, "stop", side_effect=[False, True]):
+            # A repeated cancel retries stop; rejection keeps the lease.
+            retry_result = self.agent._cancel_active_task()
+            self.assertFalse(retry_result[0])
+            self.assertTrue(self.agent._cancellation_pending)
             retry_result = self.agent._cancel_active_task()
             self.assertTrue(retry_result[0])
             self.assertFalse(self.agent._cancellation_pending)
@@ -186,6 +219,48 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertTrue(self.agent._navigation_unresolved)
         self.assertTrue(self.agent._cancellation_pending)
         self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+    def test_stop_confirmation_uses_new_stamp_and_matching_command_id(self):
+        self.assertTrue(self.agent._stop_safely("unit test"))
+        self.assertEqual(self.robot.stop_confirmation, ((0, 0), 2.0, "test-stop-1"))
+        self.assertEqual(self.robot.status_stamp(), (1, 0))
+        self.assertFalse(self.agent._cancellation_pending)
+
+    def test_stop_confirmation_can_use_command_id_without_initial_status(self):
+        self.robot.status_stamp = lambda: None
+        self.assertTrue(self.agent._stop_safely("startup without status"))
+        self.assertEqual(self.robot.stop_confirmation, (None, 2.0, "test-stop-1"))
+        self.assertFalse(self.agent._cancellation_pending)
+
+    def test_motion_timeout_with_unconfirmed_stop_keeps_admission_closed(self):
+        self.llm.release.set()
+        self.robot.wait_result = False
+        self.robot.stop_confirm_result = False
+        result = self.agent.handle_task("前进")
+        self.assertFalse(result[0])
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertEqual([action["action"] for action in self.robot.actions], ["move", "stop"])
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+        self.robot.stop_confirm_result = True
+        retry = self.agent._cancel_active_task()
+        self.assertTrue(retry[0])
+        self.assertFalse(self.agent._cancellation_pending)
+        self.agent._run_task = lambda *_args: (True, "done", "")
+        self.assertTrue(self.agent.handle_task("follow-up")[0])
+
+    def test_stop_confirmation_exception_keeps_admission_closed(self):
+        with patch.object(
+            self.robot, "wait_for_stop_confirmation",
+            side_effect=RuntimeError("status stream failed"),
+        ):
+            self.assertFalse(self.agent._stop_safely("status exception test"))
+        self.assertTrue(self.agent._cancellation_pending)
+        self.assertFalse(self.agent.handle_task("follow-up")[0])
+
+        self.robot.wait_for_stop_confirmation = lambda *_args, **_kwargs: True
+        self.assertTrue(self.agent._cancel_active_task()[0])
+        self.assertFalse(self.agent._cancellation_pending)
 
     def test_failed_stop_for_ordinary_active_task_blocks_until_retry_succeeds(self):
         for failed_result in (False, RuntimeError("publisher failed")):
@@ -224,7 +299,7 @@ class TestAgentCancellation(unittest.TestCase):
         with patch.object(self.robot, "stop", side_effect=[True, RuntimeError("final stop failed")]):
             result = self.agent._cancel_active_task()
         self.assertFalse(result[0])
-        self.assertIn("最终停止指令发送失败", result[1])
+        self.assertIn("Nav2 已结束，但停止指令失败：final stop failed", result[1])
         self.assertTrue(self.agent._cancellation_pending)
         self.assertFalse(self.agent.handle_task("follow-up")[0])
 
@@ -279,13 +354,22 @@ class TestAgentCancellation(unittest.TestCase):
 
         # The old navigation is terminal, but cancellation still owes its final
         # stop. A new task must not acquire command ownership in this interval.
-        admission_result = self.agent.handle_task("follow-up")
-        self.assertFalse(admission_result[0])
-        self.assertIn("已有任务", admission_result[1])
+        admission_result = []
+        admission_thread = threading.Thread(
+            target=lambda: admission_result.append(self.agent.handle_task("follow-up")),
+        )
+        admission_thread.start()
+        # Admission checks remain responsive while stop publication is
+        # serialized separately, and must observe the closed cancellation gate.
+        admission_thread.join(1.0)
+        self.assertFalse(admission_thread.is_alive())
+        self.assertFalse(admission_result[0][0])
+        self.assertIn("已有任务", admission_result[0][1])
 
         release_final_stop.set()
         active_thread.join(2.0)
         cancel_thread.join(2.0)
+        admission_thread.join(2.0)
         self.assertFalse(active_thread.is_alive())
         self.assertFalse(cancel_thread.is_alive())
         self.assertFalse(active_result[0][0])
@@ -321,11 +405,58 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertFalse(active_response.success)
         self.assertIn("任务已取消", active_response.response)
 
+    def test_scoped_cancel_does_not_stop_a_different_active_task(self):
+        request = TaskExecute.Request()
+        request.task = "前进"
+        request.task_id = "cli-request-a"
+        active_future = self.task_client.call_async(request)
+        self.assertTrue(self.llm.entered.wait(2.0))
+
+        cancel_request = CancelTask.Request()
+        cancel_request.task_id = "cli-request-b"
+        cancel_response = self._wait(self.cancel_client.call_async(cancel_request))
+        self.assertIsNotNone(cancel_response)
+        self.assertTrue(cancel_response.success)
+        self.assertIn("已结束", cancel_response.response)
+        self.assertEqual(self.robot.actions, [])
+
+        cancel_request.task_id = "cli-request-a"
+        cancel_response = self._wait(self.cancel_client.call_async(cancel_request))
+        self.assertIsNotNone(cancel_response)
+        self.assertTrue(cancel_response.success)
+        self.assertEqual(self.robot.actions, [{"action": "stop"}])
+        self.llm.release.set()
+        active_response = self._wait(active_future)
+        self.assertIsNotNone(active_response)
+        self.assertFalse(active_response.success)
+
     def test_stop_language_uses_the_stop_path_without_calling_llm(self):
         result = self.agent.handle_task("停止")
         self.assertTrue(result[0])
         self.assertEqual(self.robot.actions, [{"action": "stop"}])
         self.assertEqual(self.llm._calls, 0)
+
+    def test_direct_motion_timeout_sends_stop_and_reports_failure(self):
+        self.llm.release.set()
+        self.robot.wait_result = False
+        success, response, _ = self.agent.handle_task("前进")
+        self.assertFalse(success)
+        self.assertEqual(response, "执行层受理失败")
+        self.assertEqual([action["action"] for action in self.robot.actions], ["move", "stop"])
+
+    def test_cancel_can_acquire_guard_while_direct_motion_waits(self):
+        self.llm.release.set()
+        self.robot.block_wait = True
+        result = []
+        worker = threading.Thread(target=lambda: result.append(self.agent.handle_task("前进")))
+        worker.start()
+        self.assertTrue(self.robot.wait_entered.wait(2.0))
+        cancelled = self.agent._cancel_active_task()
+        worker.join(2.0)
+        self.assertFalse(worker.is_alive(), "motion wait did not observe cancellation")
+        self.assertTrue(cancelled[0])
+        self.assertFalse(result[0][0])
+        self.assertEqual([action["action"] for action in self.robot.actions], ["move", "stop"])
 
 
 if __name__ == "__main__":

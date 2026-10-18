@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 
 from robot_agent.llm import LLMError
@@ -35,17 +36,58 @@ class ApproachController:
         if self._cancelled():
             return False, "任务已取消", result[2]
         if not result[0]:
-            stop = getattr(self._robot, "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception as exc:
-                    self._logger.error(f"failed to stop after approach failure: {exc}")
+            if not self._stop_and_confirm():
+                result = (False, f"{result[1]}；停止状态未确认", result[2])
         return result
+
+    def _stop_and_confirm(self) -> bool:
+        stop = getattr(self._robot, "stop", None)
+        confirm = getattr(self._robot, "wait_for_stop_confirmation", None)
+        stamp = getattr(self._robot, "status_stamp", None)
+        if not callable(stop) or not callable(confirm) or not callable(stamp):
+            return False
+        try:
+            before_stamp = stamp()
+            if not stop():
+                return False
+            command_id = getattr(self._robot, "latest_command_id", None)
+            return bool(confirm(before_stamp, timeout_sec=2.0, command_id=command_id))
+        except Exception as exc:
+            self._logger.error(f"failed to confirm stop after approach: {exc}")
+            return False
+
+    def _vision_is_fresh(self, vision) -> bool:
+        if not isinstance(vision, dict) or vision.get("stale") is not False:
+            return False
+        observed_at = vision.get("observed_at")
+        age_sec = vision.get("age_sec")
+        if (not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool)
+                or not math.isfinite(observed_at) or observed_at <= 0 or observed_at > time.time()
+                or not isinstance(age_sec, (int, float)) or isinstance(age_sec, bool)
+                or not math.isfinite(age_sec) or age_sec < 0):
+            return False
+        max_age_sec = float(getattr(self._vision, "max_age_sec", 2.5))
+        return max(time.time() - observed_at, age_sec) <= max_age_sec
+
+    @staticmethod
+    def _contains_target(vision, goal: str) -> bool:
+        if not goal or not isinstance(vision, dict):
+            return False
+        objects = vision.get("objects")
+        if not isinstance(objects, list):
+            return False
+        target = goal.strip().casefold()
+        return any(
+            isinstance(obj, dict) and isinstance(obj.get("name"), str)
+            and target in obj["name"].casefold()
+            for obj in objects
+        )
 
     def _run(self, goal: str, task: str) -> tuple[bool, str, str]:
         goal = (goal or "").strip()
         try:
+            if not goal:
+                return False, "接近任务缺少目标名称。", ""
             if self._cancelled():
                 return False, "任务已取消", ""
             find_target = lambda: (
@@ -55,9 +97,9 @@ class ApproachController:
             vision = find_target()
             if self._cancelled():
                 return False, "任务已取消", ""
-            if vision.get("stale"):
+            if not self._vision_is_fresh(vision):
                 return False, "视觉结果已过期，请等待新画面。", json.dumps(vision, ensure_ascii=False)
-            if not vision.get("found"):
+            if not vision.get("found") or not self._contains_target(vision, goal):
                 response = f"没有发现目标 {goal}。" if goal else "当前场景未检测到任何物体。"
                 return False, response, json.dumps(vision, ensure_ascii=False)
 
@@ -65,7 +107,7 @@ class ApproachController:
             wait_for_motion = getattr(self._robot, "wait_for_motion_complete", None)
             closed_loop = callable(wait_for_scene) and callable(wait_for_motion)
             if not closed_loop or not all(callable(getattr(self._robot, name, None)) for name in (
-                "status_stamp", "get_sensor", "stop"
+                "status_stamp", "get_sensor", "stop", "wait_for_stop_confirmation"
             )):
                 return False, "接近需要完整的视觉、运动和测距反馈接口", ""
             max_steps = self._max_steps
@@ -87,7 +129,7 @@ class ApproachController:
                     stop_distance = self._stop_distance
                     if float(clearance["distance"]) <= stop_distance:
                         if centered and float(clearance["distance"]) >= stop_distance - 0.25:
-                            if self._robot.stop():
+                            if self._stop_and_confirm():
                                 return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
                         failure = {
                             **clearance,
@@ -111,6 +153,27 @@ class ApproachController:
                     # The controller updates at 10 Hz; shorten the last step
                     # to the remaining distance, with one update as minimum.
                     motion.duration = min(motion.duration, max(0.1, margin / motion.linear_x))
+
+                # Planning may take seconds (or longer for a remote provider).
+                # Do not dispatch a command from a vision/range sample that aged
+                # out while the planner was responding.
+                if not self._vision_is_fresh(vision):
+                    return False, "视觉观测在规划完成后已过期", last_action_json
+                clearance = get_sensor("front_range")
+                if not clearance.get("available"):
+                    return False, "规划完成后前方测距已过期", last_action_json
+                if float(clearance["distance"]) <= stop_distance:
+                    objects = vision.get("objects", [])
+                    centered = bool(objects) and objects[0].get("direction") == "center"
+                    if (centered and float(clearance["distance"]) >= stop_distance - 0.25
+                            and self._stop_and_confirm()):
+                        return True, "已到达目标前方的接近停止距离", json.dumps(clearance, ensure_ascii=False)
+                    return False, "规划完成后前方距离不足，停止接近", json.dumps(clearance, ensure_ascii=False)
+                if motion.action == "move" and motion.linear_x > 0:
+                    margin = max(0.0, float(clearance["distance"]) - stop_distance)
+                    motion.duration = min(
+                        motion.duration, max(0.1, margin / motion.linear_x)
+                    )
                 last_action_json = json.dumps(motion.to_command_dict(), ensure_ascii=False)
 
                 status_stamp = self._robot.status_stamp()
@@ -161,9 +224,9 @@ class ApproachController:
                         return False, message, last_action_json
                     query_scene = getattr(self._vision, "query_scene", None)
                     vision = query_scene(scene, goal) if callable(query_scene) else find_target()
-                    if vision.get("stale"):
+                    if not self._vision_is_fresh(vision):
                         return False, "运动后的视觉结果已过期", json.dumps(vision, ensure_ascii=False)
-                    if vision.get("found"):
+                    if vision.get("found") and self._contains_target(vision, goal):
                         break
                     # Re-observe while stationary. Never issue another motion
                     # based on the previous detection after a missed frame.

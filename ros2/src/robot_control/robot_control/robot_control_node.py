@@ -51,6 +51,7 @@ class RobotControlNode(Node):
         self._active: VelocityCommand | None = None
         self._remaining: float = 0.0
         self._last_action: str = ""
+        self._last_command_id: str = ""
 
         self._timer = self.create_timer(1.0 / self._update_rate, self._tick)
         self.get_logger().info(
@@ -67,6 +68,7 @@ class RobotControlNode(Node):
         status.message = message
         status.remaining = remaining
         status.stamp = self.get_clock().now().to_msg()
+        status.command_id = self._last_command_id
         self._status_pub.publish(status)
 
     def _publish_twist(self, vel: VelocityCommand) -> None:
@@ -90,7 +92,9 @@ class RobotControlNode(Node):
         angular_z: float,
         duration: float,
         goal: str,
+        command_id: str = "",
     ) -> tuple[bool, str]:
+        self._last_command_id = command_id
         ok, err = validate_command(
             action, linear_x, linear_y, angular_z, duration, self._max_linear, self._max_angular
         )
@@ -117,7 +121,8 @@ class RobotControlNode(Node):
 
     def _on_command(self, msg: RobotCommand) -> None:
         self._handle_command(
-            msg.action, msg.linear_x, msg.linear_y, msg.angular_z, msg.duration, msg.goal
+            msg.action, msg.linear_x, msg.linear_y, msg.angular_z, msg.duration,
+            msg.goal, msg.command_id,
         )
 
     def _on_execute_command(self, request, response) -> ExecuteCommand.Response:
@@ -128,6 +133,7 @@ class RobotControlNode(Node):
             request.command.angular_z,
             request.command.duration,
             request.command.goal,
+            request.command.command_id,
         )
         response.success = success
         response.message = message

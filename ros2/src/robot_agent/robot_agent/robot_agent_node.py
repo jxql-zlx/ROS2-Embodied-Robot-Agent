@@ -71,12 +71,18 @@ class RobotAgentNode(Node):
         self._mode = str(self.get_parameter("mode").value).lower()
         self._hierarchical = hierarchical
         self._task_guard = threading.Lock()
+        # Serialize command publication independently from task admission and
+        # status waits. Stop publication must not hold _task_guard while a
+        # publisher is slow or blocked.
+        self._command_guard = threading.Lock()
         self._cancel_guard = threading.Lock()
         self._active_cancel_event: Optional[threading.Event] = None
         self._active_task_done: Optional[threading.Event] = None
+        self._active_task_id: Optional[str] = None
         self._task_generation = 0
         self._navigation_unresolved = False
         self._cancellation_pending = False
+        self._last_stop_failure_reason = ""
         self._task_callback_group = ReentrantCallbackGroup()
         self._cancel_callback_group = ReentrantCallbackGroup()
 
@@ -130,44 +136,51 @@ class RobotAgentNode(Node):
             "cancel", "cancel task", "abort", "急停",
         }
 
-    def _cancel_active_task(self) -> tuple[bool, str, str]:
+    def _cancel_active_task(self, task_id: str = "") -> tuple[bool, str, str]:
         # Snapshot under the task guard, then release it before taking the
         # cancellation guard. The serialized path may acquire task_guard, so
         # keeping these locks unnested avoids an inverse lock-order deadlock.
         with self._task_guard:
             requested_generation = self._task_generation
+            if task_id and self._active_task_id != task_id:
+                return True, "取消请求对应的任务已结束", ""
         # A second cancel must not issue a delayed stop after the first cancel
         # has released its task lease and a follow-up task has started.
         with self._cancel_guard:
-            return self._cancel_active_task_serialized(requested_generation)
+            return self._cancel_active_task_serialized(requested_generation, task_id)
 
-    def _cancel_active_task_serialized(self, requested_generation: int) -> tuple[bool, str, str]:
+    def _cancel_active_task_serialized(
+        self, requested_generation: int, task_id: str = ""
+    ) -> tuple[bool, str, str]:
         # Serialize cancellation with command submission. Keep the active-task
         # lease until its execution thread observes cancellation and exits.
         self.get_logger().info("cancel requested")
         try:
             with self._task_guard:
-                if self._task_generation != requested_generation:
+                if (self._task_generation != requested_generation or
+                        (task_id and self._active_task_id != task_id)):
                     return True, "取消请求对应的任务已结束", ""
                 event = self._active_cancel_event
                 task_done = self._active_task_done
                 navigation_unresolved = self._navigation_unresolved
                 navigation_was_unresolved = navigation_unresolved
-                # Retain an admission lease until this stop is confirmed. This
-                # covers Nav2 terminal races and ordinary motion tasks alike.
+                # Retain admission until a task-correlated terminal stop is
+                # confirmed. The confirmation wait happens after this lock.
                 self._cancellation_pending = True
                 if event is not None:
                     event.set()
-                stopped = bool(self._tool.stop())
             self.get_logger().info(
                 f"cancel signaled: task_active={event is not None}, "
                 f"navigation_unresolved={navigation_unresolved}"
             )
         except Exception as exc:
-            self.get_logger().error(f"stop command failed: {exc}")
-            return False, f"停止指令发送失败：{exc}", ""
-        if not stopped:
-            return False, "停止指令发送失败", ""
+            self.get_logger().error(f"cancel setup failed: {exc}")
+            with self._task_guard:
+                self._cancellation_pending = True
+            return False, f"停止状态未确认：{exc}", ""
+        if not self._stop_safely("for task cancellation"):
+            reason = self._last_stop_failure_reason or "停止状态未确认"
+            return False, f"{reason}；新任务暂不可执行", ""
         if navigation_unresolved:
             if task_done is None:
                 return False, "Nav2 尚未确认取消；新任务暂不可执行", ""
@@ -179,68 +192,135 @@ class RobotAgentNode(Node):
                 navigation_unresolved = self._navigation_unresolved
             if navigation_unresolved:
                 self.get_logger().warn("Nav2 cancellation remains unconfirmed")
-                self._stop_safely("while Nav2 cancellation remains unconfirmed")
                 return False, "Nav2 尚未确认取消；新任务暂不可执行", ""
             if not self._stop_safely("after Nav2 reached a terminal state"):
-                return False, "Nav2 已结束，但最终停止指令发送失败", ""
-            with self._task_guard:
-                self._cancellation_pending = False
-        elif self._cancellation_pending:
-            # A previous navigation cancellation may have reached its terminal
-            # state after timing out. A fresh confirmed stop completes its lease.
-            with self._task_guard:
-                if not self._navigation_unresolved:
-                    self._cancellation_pending = False
+                reason = self._last_stop_failure_reason or "最终停止状态未确认"
+                return False, f"Nav2 已结束，但{reason}", ""
         response = "导航已取消并确认停止" if navigation_was_unresolved else (
-            "任务已取消并已发送停止" if event is not None else "已发送停止，当前没有运行任务"
+            "任务已取消并确认停止" if event is not None else "已发送停止并确认当前已停车"
         )
         return True, response, json.dumps({"action": "stop"}, ensure_ascii=False)
 
     def _stop_safely(self, context: str) -> bool:
+        """Send a fresh stop and confirm its correlated terminal status.
+
+        Any missing, rejected, timed out, or errored confirmation keeps task
+        admission closed. A later explicit stop/cancel request can retry it.
+        """
+        before_stamp = None
+        command_id = None
+        self._last_stop_failure_reason = ""
         try:
-            if self._tool.stop():
-                return True
-            self.get_logger().error(f"stop command rejected {context}")
+            with self._command_guard:
+                with self._task_guard:
+                    self._cancellation_pending = True
+                    stamp = getattr(self._tool, "status_stamp", None)
+                    before_stamp = stamp() if callable(stamp) else None
+                accepted = bool(self._tool.stop())
+                command_id = getattr(self._tool, "latest_command_id", None)
         except Exception as exc:
             self.get_logger().error(f"stop command raised {context}: {exc}")
-        return False
+            self._last_stop_failure_reason = f"停止指令失败：{exc}"
+            with self._task_guard:
+                self._cancellation_pending = True
+            return False
+        if not accepted:
+            self.get_logger().error(f"stop command rejected {context}")
+            self._last_stop_failure_reason = "停止指令被拒绝"
+            return False
 
-    def _dispatch_action(self, event: threading.Event, action: Dict[str, Any]) -> bool:
+        waiter = getattr(self._tool, "wait_for_stop_confirmation", None)
+        # At startup the status stream may not have emitted any sample yet.
+        # A unique command ID still proves that the subsequent status belongs
+        # to this stop, even when there is no timestamp baseline to compare.
+        if not callable(waiter) or not command_id:
+            self.get_logger().error(
+                f"stop feedback unavailable {context}: command_id/confirmation missing"
+            )
+            self._last_stop_failure_reason = "停止反馈不可用"
+            return False
+        try:
+            confirmed = bool(waiter(
+                before_stamp, timeout_sec=2.0, command_id=command_id
+            ))
+        except Exception as exc:
+            self.get_logger().error(f"stop confirmation failed {context}: {exc}")
+            self._last_stop_failure_reason = f"停止状态确认失败：{exc}"
+            confirmed = False
+        with self._task_guard:
+            if confirmed and not self._navigation_unresolved:
+                self._cancellation_pending = False
+            else:
+                self._cancellation_pending = True
+        if not confirmed:
+            self.get_logger().error(f"stop status was not confirmed {context}")
+            if not self._last_stop_failure_reason:
+                self._last_stop_failure_reason = "停止状态未确认"
+        return confirmed
+
+    def _dispatch_action(
+        self, event: threading.Event, action: Dict[str, Any], wait_for_completion: bool = True
+    ) -> bool:
         if action.get("action") == "navigate" and callable(getattr(self._tool, "navigate", None)):
             return self._dispatch_navigation(
                 event,
                 str(action.get("goal", "")),
                 float(action.get("timeout", 120.0)),
             )
-        with self._task_guard:
-            if event.is_set():
-                return False
-            return bool(self._tool.execute_action(action))
+        is_motion = action.get("action") in ("move", "rotate")
+        before_stamp = None
+        with self._command_guard:
+            with self._task_guard:
+                if event.is_set() or self._cancellation_pending:
+                    return False
+                if is_motion:
+                    stamp = getattr(self._tool, "status_stamp", None)
+                    before_stamp = stamp() if callable(stamp) else None
+            accepted = bool(self._tool.execute_action(action))
+        if not accepted:
+            return False
+        if not is_motion or not wait_for_completion:
+            return True
+
+        wait_motion = getattr(self._tool, "wait_for_motion_complete", None)
+        if not callable(wait_motion):
+            self._stop_safely("motion feedback unavailable")
+            return False
+        try:
+            duration = float(action.get("duration", 0.0))
+            completed = wait_motion(
+                before_stamp, max(3.0, duration + 2.0), cancel_event=event
+            )
+        except Exception as exc:
+            self.get_logger().error(f"motion feedback failed: {exc}")
+            completed = False
+        if completed:
+            return True
+        if not event.is_set():
+            if not self._stop_safely("motion failed or timed out"):
+                self.get_logger().error("motion failed and stop remains unconfirmed; admission closed")
+        return False
 
     def _dispatch_navigation(self, event: threading.Event, goal: str, timeout: float) -> bool:
         if event.is_set():
             return False
         return bool(self._tool.navigate(goal, timeout=timeout, cancel_event=event,
-                                        command_guard=self._task_guard,
+                                        command_guard=self._command_guard,
                                         navigation_state_callback=self._set_navigation_unresolved))
 
     def _set_navigation_unresolved(self, active: bool) -> None:
         with self._task_guard:
             self._navigation_unresolved = bool(active)
-            if (not active and self._cancellation_pending and
-                    self._active_cancel_event is None):
-                try:
-                    stopped = bool(self._tool.stop())
-                except Exception as exc:
-                    self.get_logger().error(f"final stop after late Nav2 result failed: {exc}")
-                    stopped = False
-                if stopped:
-                    self._cancellation_pending = False
+            needs_retry = not active and self._cancellation_pending
+        if needs_retry:
+            self.get_logger().warn(
+                "Nav2 reached a terminal state; cancellation stop must be explicitly retried"
+            )
 
-    def handle_task(self, task: str) -> tuple[bool, str, str]:
+    def handle_task(self, task: str, task_id: str = "") -> tuple[bool, str, str]:
         """Run one NL task. Returns (success, response, action_json)."""
         if self._is_stop_request(task):
-            return self._cancel_active_task()
+            return self._cancel_active_task(task_id)
         event = threading.Event()
         task_done = threading.Event()
         with self._task_guard:
@@ -248,6 +328,7 @@ class RobotAgentNode(Node):
                     self._cancellation_pending):
                 return False, "已有任务正在执行", ""
             self._task_generation += 1
+            self._active_task_id = task_id or f"task-{self._task_generation}"
             self._active_cancel_event = event
             self._active_task_done = task_done
         try:
@@ -260,6 +341,7 @@ class RobotAgentNode(Node):
                 if self._active_cancel_event is event:
                     self._active_cancel_event = None
                     self._active_task_done = None
+                    self._active_task_id = None
                 task_done.set()
 
     def _run_task(self, task: str, cancel_event: threading.Event) -> tuple[bool, str, str]:
@@ -306,7 +388,12 @@ class RobotAgentNode(Node):
         try:
             context = {
                 "_cancel_event": cancel_event,
-                "_execute_action": lambda action: self._dispatch_action(cancel_event, action),
+                "_execute_action": lambda action: self._dispatch_action(
+                    cancel_event, action, wait_for_completion=True
+                ),
+                "_execute_approach_action": lambda action: self._dispatch_action(
+                    cancel_event, action, wait_for_completion=False
+                ),
                 "_navigate": lambda goal, timeout: self._dispatch_navigation(cancel_event, goal, timeout),
                 "_cancel_task": self._cancel_active_task,
             }
@@ -376,11 +463,13 @@ class RobotAgentNode(Node):
         self.get_logger().info(f"[task done] success={success} response={response}")
 
     def _on_task_service(self, request, response) -> TaskExecute.Response:
-        response.success, response.response, response.action_json = self.handle_task(request.task)
+        response.success, response.response, response.action_json = self.handle_task(
+            request.task, request.task_id
+        )
         return response
 
-    def _on_cancel_service(self, _request, response) -> CancelTask.Response:
-        response.success, response.response, _ = self._cancel_active_task()
+    def _on_cancel_service(self, request, response) -> CancelTask.Response:
+        response.success, response.response, _ = self._cancel_active_task(request.task_id)
         return response
 
 

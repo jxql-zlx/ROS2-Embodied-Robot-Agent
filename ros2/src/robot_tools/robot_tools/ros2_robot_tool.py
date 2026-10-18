@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import time
+import uuid
 from collections import deque
 from threading import Condition, Event, Lock
 from typing import Any, Dict, Optional
@@ -65,8 +66,11 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self._nav_client = ActionClient(self, NavigateToPose, navigate_server)
         self._latest_pose: Optional[Dict[str, float]] = None
         self._latest_status: Optional[RobotStatus] = None
+        self._latest_command_id: Optional[str] = None
+        self._last_navigation_goal_id: Optional[str] = None
         self._latest_scan: Optional[LaserScan] = None
         self._scan_received_at = 0.0
+        self._last_scan_stamp_ns: Optional[int] = None
         self._scan_condition = Condition()
         self._scan_history = deque(maxlen=10)
         self._scan_sub = self.create_subscription(
@@ -99,7 +103,19 @@ class Ros2RobotTool(Node, BaseRobotTool):
             self._status_condition.notify_all()
 
     def _on_scan(self, msg: LaserScan) -> None:
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        if stamp_ns <= 0:
+            # Without a source timestamp, repeated delivery cannot be
+            # distinguished from a new measurement and must not confirm range.
+            return
         with self._scan_condition:
+            if self._last_scan_stamp_ns == stamp_ns:
+                return
+            if self._last_scan_stamp_ns is not None and stamp_ns < self._last_scan_stamp_ns:
+                # Simulation time can restart with a fresh world. Drop old
+                # samples rather than treating new-epoch stamps as stale.
+                self._scan_history.clear()
+            self._last_scan_stamp_ns = stamp_ns
             self._latest_scan = msg
             self._scan_received_at = time.monotonic()
             self._scan_history.append((self._scan_received_at, self.front_range(msg)))
@@ -153,11 +169,16 @@ class Ros2RobotTool(Node, BaseRobotTool):
             stamp = self._latest_status.stamp if self._latest_status else None
             return (stamp.sec, stamp.nanosec) if stamp is not None else None
 
+    @property
+    def latest_command_id(self) -> Optional[str]:
+        return self._latest_command_id
+
     def wait_for_motion_complete(
         self,
         after_stamp: Optional[tuple[int, int]],
         timeout_sec: float,
         cancel_event=None,
+        command_id: Optional[str] = None,
     ) -> bool:
         """Wait for a move/rotate command to report a terminal status."""
         deadline = time.monotonic() + max(0.0, timeout_sec)
@@ -169,7 +190,9 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 if status is not None:
                     stamp = (status.stamp.sec, status.stamp.nanosec)
                     is_new = after_stamp is None or stamp > after_stamp
-                    if is_new and status.action in ("move", "rotate"):
+                    expected_id = command_id or self._latest_command_id
+                    id_matches = expected_id is None or status.command_id == expected_id
+                    if is_new and id_matches and status.action in ("move", "rotate"):
                         if status.state == "error":
                             return False
                         if status.state in ("done", "stopped"):
@@ -179,8 +202,37 @@ class Ros2RobotTool(Node, BaseRobotTool):
                     return False
                 self._status_condition.wait(min(remaining, 0.1) if cancel_event is not None else remaining)
 
+    def wait_for_stop_confirmation(
+        self,
+        after_stamp: Optional[tuple[int, int]],
+        timeout_sec: float = 2.0,
+        cancel_event=None,
+        command_id: Optional[str] = None,
+    ) -> bool:
+        """Wait for the control layer to confirm this stop command."""
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._status_condition:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                status = self._latest_status
+                if status is not None:
+                    stamp = (status.stamp.sec, status.stamp.nanosec)
+                    is_new = after_stamp is None or stamp > after_stamp
+                    expected_id = command_id or self._latest_command_id
+                    id_matches = expected_id is None or status.command_id == expected_id
+                    if is_new and id_matches and status.action == "stop":
+                        return status.state == "stopped"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._status_condition.wait(
+                    min(remaining, 0.1) if cancel_event is not None else remaining
+                )
+
     def _publish(self, action: str, **fields: Any) -> bool:
         msg = RobotCommand()
+        command_id = str(fields.get("command_id") or uuid.uuid4().hex)
         msg.action = action
         msg.linear_x = float(fields.get("linear_x", 0.0))
         msg.linear_y = float(fields.get("linear_y", 0.0))
@@ -188,6 +240,8 @@ class Ros2RobotTool(Node, BaseRobotTool):
         msg.duration = float(fields.get("duration", 0.0))
         msg.goal = str(fields.get("goal", ""))
         msg.source = str(fields.get("source", ""))
+        msg.command_id = command_id
+        self._latest_command_id = command_id
         self._cmd_pub.publish(msg)
         return True
 
@@ -224,6 +278,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
             return False
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = pose
+        self._last_navigation_goal_id = None
         wait = bool(kwargs.get("wait", True))
         timeout = max(0.0, float(kwargs.get("timeout", 120.0)))
         cancel_event = kwargs.get("cancel_event")
@@ -345,6 +400,10 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 with state_lock:
                     outcome["accepted"] = None if handle is None else bool(handle.accepted)
                     outcome["goal_handle"] = handle
+                goal_info = getattr(handle, "goal_id", None)
+                goal_uuid = getattr(goal_info, "uuid", None)
+                if goal_uuid is not None and len(goal_uuid):
+                    self._last_navigation_goal_id = bytes(goal_uuid).hex()
                 goal_response_done.set()
                 if handle is None:
                     self.get_logger().error(
@@ -424,6 +483,10 @@ class Ros2RobotTool(Node, BaseRobotTool):
     def get_pose(self) -> Optional[Dict[str, float]]:
         return self._latest_pose
 
+    @property
+    def last_navigation_goal_id(self) -> Optional[str]:
+        return self._last_navigation_goal_id
+
     def get_sensor(self, name: str) -> Dict[str, Any]:
         if name == "front_range":
             scan = self._latest_scan
@@ -455,6 +518,7 @@ class Ros2RobotTool(Node, BaseRobotTool):
             duration=action.get("duration", 0.0),
             goal=action.get("goal", ""),
             source=action.get("source", ""),
+            command_id=action.get("command_id") or uuid.uuid4().hex,
         )
 
     def latest_status(self) -> Optional[RobotStatus]:

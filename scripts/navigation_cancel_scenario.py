@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise agent cancellation while a Nav2 goal is actively moving the robot."""
 
+import json
 import math
 import sys
 import time
+import uuid
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
@@ -177,7 +179,8 @@ def main():
         start_sample_index = len(node.odom_samples) - 1
         known_goal_ids = set(node.navigation_statuses)
         request = TaskExecute.Request()
-        request.task = f"导航到 {navigation_goal_x},0,0"
+        request.task = f"导航到 {navigation_goal_x},0,0，然后找杯子并靠近"
+        request.task_id = uuid.uuid4().hex
         task_future = node.task_client.call_async(request)
         active_statuses = {GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING}
         scenario_goal = {}
@@ -220,7 +223,9 @@ def main():
             f"status={node.goal_status(goal_id)}; pose={node.pose}",
             flush=True,
         )
-        cancel_future = node.cancel_client.call_async(CancelTask.Request())
+        cancel_request = CancelTask.Request()
+        cancel_request.task_id = request.task_id
+        cancel_future = node.cancel_client.call_async(cancel_request)
         if not node.spin_until(lambda: cancel_future.done(), 20.0):
             raise RuntimeError(
                 f"cancel service did not finish within 20 seconds; statuses="
@@ -234,6 +239,12 @@ def main():
         task_response = task_future.result()
         if task_response.success or "取消" not in task_response.response:
             raise RuntimeError(f"task did not report cancellation: {task_response.response}")
+        try:
+            cancelled_results = json.loads(task_response.action_json)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"cancelled composite task returned invalid stage log: {exc}") from exc
+        if any(item.get("task_id") in (2, 3) for item in cancelled_results):
+            raise RuntimeError(f"cancellation allowed dependent stages to run: {cancelled_results}")
 
         terminal_statuses = {
             GoalStatus.STATUS_SUCCEEDED,
@@ -294,6 +305,7 @@ def main():
         known_followup_goals = set(node.last_goal_statuses)
         followup = TaskExecute.Request()
         followup.task = f"导航到 {followup_goal[0]},{followup_goal[1]},0"
+        followup.task_id = uuid.uuid4().hex
         followup_future = node.task_client.call_async(followup)
         if not node.spin_until(lambda: followup_future.done(), 90.0):
             raise RuntimeError("follow-up navigation did not finish")
@@ -372,7 +384,10 @@ def main():
     finally:
         if task_future is not None and not scenario_passed:
             try:
-                cleanup_future = node.cancel_client.call_async(CancelTask.Request())
+                cleanup_request = CancelTask.Request()
+                cleanup_request.task_id = (followup.task_id if "followup" in locals()
+                                           else request.task_id)
+                cleanup_future = node.cancel_client.call_async(cleanup_request)
                 node.spin_until(lambda: cleanup_future.done(), 3.0)
                 node.spin_until(lambda: task_future.done(), 3.0)
                 print("failure_cleanup_cancel: requested; "

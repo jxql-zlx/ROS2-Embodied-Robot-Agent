@@ -75,6 +75,20 @@ class TestChatCompletionsLLM(unittest.TestCase):
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].tool, "vision")
 
+    @mock.patch("requests.post")
+    def test_plan_goal_rejects_unsafe_model_plan(self, post):
+        post.return_value = _FakeResponse({"choices": [{"message": {"content":
+            '{"goal":"move","tasks":[{"id":1,"tool":"robot","action":"move",'
+            '"params":{"duration":0}}]}'
+        }}]})
+        with self.assertRaises(LLMError):
+            ChatCompletionsLLM().plan_goal("move")
+
+    @mock.patch("requests.post", side_effect=TimeoutError("mock timeout"))
+    def test_plan_goal_http_timeout_is_reported_without_fallback(self, _post):
+        with self.assertRaisesRegex(LLMError, "LLM planning failed"):
+            ChatCompletionsLLM().plan_goal("move")
+
 
 if __name__ == "__main__":
     unittest.main()

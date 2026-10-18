@@ -160,6 +160,7 @@ case "$SCENARIO" in
     ;;
 esac
 echo "SCENARIO=$SCENARIO TASK=$TASK"
+BASELINE=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 if ros2 run robot_agent send_task "$TASK" --service --timeout 180 \
   > "$LOG_DIR/task.log" 2>&1; then
   task_rc=0
@@ -173,7 +174,6 @@ if [ "$task_rc" -ne "$expected_rc" ]; then
   exit 1
 fi
 
-BASELINE=$(python3 "$SCRIPTS_DIR/odom_pose.py")
 python3 - "$SCENARIO" "$LOG_DIR/task.log" "$LOG_DIR/stages" <<'PY'
 import json
 import math
@@ -189,10 +189,15 @@ line = next((line.partition(":")[2].strip() for line in text.splitlines()
 if not line:
     raise SystemExit("FAIL: task response has no action_json")
 results = json.loads(line)
+service_task_id = next((line.partition(":")[2].strip() for line in text.splitlines()
+                        if line.startswith("task_id")), "")
+if not service_task_id:
+    raise SystemExit("FAIL: service task UUID is missing from send_task output")
 out = pathlib.Path(output_dir)
 out.mkdir(parents=True, exist_ok=True)
 names = {1: "navigation", 2: "vision", 3: "approach", -1: "task_summary"}
 for result in results:
+    result["service_task_id"] = service_task_id
     stage = names.get(result.get("task_id"), f"task_{result.get('task_id')}")
     (out / f"{result.get('task_id'):02d}_{stage}.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -216,6 +221,14 @@ if scenario == "success":
     distance = approach.get("distance")
     if not approach.get("available") or not isinstance(distance, (int, float)) or not 0.4 <= distance <= 0.65:
         raise SystemExit(f"FAIL: approach did not verify the stop distance: {approach}")
+    for stage in results[:3]:
+        data = stage.get("data", {})
+        if not isinstance(data.get("stage_start_pose"), dict) or not isinstance(data.get("stage_end_pose"), dict):
+            raise SystemExit(f"FAIL: stage {stage.get('task_id')} lacks start/end pose evidence: {data}")
+    if not results[0].get("data", {}).get("navigation_goal_id"):
+        raise SystemExit("FAIL: navigation stage lacks a Nav2 goal UUID")
+    if not results[2].get("data", {}).get("last_command_id"):
+        raise SystemExit("FAIL: approach stage lacks a correlated motion command UUID")
 elif scenario == "navigation_failure":
     if (len(results) != 2 or results[0].get("task_id") != 1 or
             results[0].get("success") or results[-1].get("task_id") != -1):
@@ -247,6 +260,13 @@ elif scenario in ("blocked", "vision_dropout", "range_dropout"):
         if (not approach.get("available") or not isinstance(approach.get("distance"), (int, float))
                 or approach["distance"] >= 0.4):
             raise SystemExit(f"FAIL: blocked scenario did not verify close obstacle: {approach}")
+        start = results[2]["data"].get("stage_start_pose")
+        end = results[2]["data"].get("stage_end_pose")
+        if not isinstance(start, dict) or not isinstance(end, dict):
+            raise SystemExit("FAIL: blocked approach lacks stage pose evidence")
+        approach_travel = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+        if approach_travel > 0.02:
+            raise SystemExit(f"FAIL: robot moved during blocked approach stage: {approach_travel:.3f}m")
 print(f"PASS: {scenario}; stage logs: {out}")
 PY
 

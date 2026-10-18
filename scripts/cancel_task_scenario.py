@@ -4,6 +4,7 @@
 import math
 import sys
 import time
+import uuid
 
 import rclpy
 from nav_msgs.msg import Odometry
@@ -56,6 +57,7 @@ def main():
 
         request = TaskExecute.Request()
         request.task = task
+        request.task_id = uuid.uuid4().hex
         task_future = node._task_client.call_async(request)
         if not node.spin_until(
             lambda: any(action in ("move", "rotate") for _, action in node.commands)
@@ -67,7 +69,9 @@ def main():
             raise RuntimeError("task finished before motion started")
 
         cancel_started = time.monotonic()
-        cancel_future = node._cancel_client.call_async(CancelTask.Request())
+        cancel_request = CancelTask.Request()
+        cancel_request.task_id = request.task_id
+        cancel_future = node._cancel_client.call_async(cancel_request)
         if not node.spin_until(lambda: cancel_future.done(), 2.0):
             raise RuntimeError("cancel service did not respond within two seconds")
         cancel_response = cancel_future.result()

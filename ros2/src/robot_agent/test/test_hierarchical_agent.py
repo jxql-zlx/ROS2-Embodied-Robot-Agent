@@ -8,7 +8,7 @@ from robot_agent.hierarchical_agent import build_hierarchical_agent
 from robot_agent.executor.base_executor import BaseExecutor, TaskResult
 from robot_agent.hierarchical_agent import HierarchicalAgent
 from robot_agent.planner.base_planner import BasePlanner
-from robot_agent.planner.task_schema import Plan, Task
+from robot_agent.planner.task_schema import Plan, PlanValidationError, Task
 
 
 class _FakeRobotTool:
@@ -42,6 +42,9 @@ class _FakeRobotTool:
 
     def stop(self):
         self.actions.append({"action": "stop"})
+        return True
+
+    def wait_for_stop_confirmation(self, *_args, **_kwargs):
         return True
 
 
@@ -89,14 +92,14 @@ class _FixedPlanner(BasePlanner):
         return Plan(
             goal=goal,
             tasks=[
-                Task(id=1, tool="robot", action="first"),
-                Task(id=2, tool="robot", action="second"),
+                Task(id=1, tool="robot", action="stop"),
+                Task(id=2, tool="robot", action="stop"),
             ],
         )
 
     def replan(self, goal, task, result):
         self.replan_calls += 1
-        return Plan(goal=goal, tasks=[Task(id=1, tool="robot", action="retry")])
+        return Plan(goal=goal, tasks=[Task(id=1, tool="robot", action="rotate")])
 
 
 class _FixedExecutor(BaseExecutor):
@@ -105,6 +108,20 @@ class _FixedExecutor(BaseExecutor):
 
     def execute(self, task, context):
         return TaskResult(task.id, self.success, "done" if self.success else "failed")
+
+
+class _InvalidPlanner(_FixedPlanner):
+    def plan(self, goal):
+        return Plan(goal=goal, tasks=[Task(id=1, tool="robot", action="teleport")])
+
+
+class _RecordingExecutor(BaseExecutor):
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, task, context):
+        self.calls.append(task)
+        return TaskResult(task.id, True)
 
 
 class _CancelDuringTaskExecutor(BaseExecutor):
@@ -119,6 +136,13 @@ class _CancelDuringTaskExecutor(BaseExecutor):
 
 
 class TestHierarchicalAgent(unittest.TestCase):
+    def test_invalid_model_plan_fails_closed_before_execution(self):
+        executor = _RecordingExecutor()
+        agent = HierarchicalAgent(_InvalidPlanner(), executor)
+        with self.assertRaises(PlanValidationError):
+            agent.run("导航到目标")
+        self.assertEqual(executor.calls, [])
+
     def test_navigation_then_find_and_approach_is_ordered_and_dependent(self):
         robot = _FakeRobotTool()
         vision = _FakeVisionTool()
@@ -218,6 +242,30 @@ class TestHierarchicalAgent(unittest.TestCase):
         )
         self.assertTrue(results[-1].data["cancelled"])
         self.assertIsNone(vision.last_query)
+        self.assertEqual(robot.actions, [])
+
+    def test_cancellation_after_vision_prevents_dependent_approach(self):
+        cancel_event = threading.Event()
+        robot = _FakeRobotTool()
+
+        class CancellingVision(_FakeVisionTool):
+            def find_object(self, name):
+                result = super().find_object(name)
+                cancel_event.set()
+                return result
+
+        vision = CancellingVision()
+        agent = build_hierarchical_agent(
+            {"provider": "mock"}, robot_tool=robot, vision_tool=vision
+        )
+        results = agent.run(
+            "导航到 1.0,0.5，然后找杯子并靠近",
+            context={"_navigate": lambda *_args: True},
+            cancel_event=cancel_event,
+        )
+        self.assertEqual([item.task_id for item in results], [1, 2, -1])
+        self.assertTrue(results[-1].data["cancelled"])
+        self.assertEqual(vision.last_query, ("find", "cup"))
         self.assertEqual(robot.actions, [])
 
     def test_hierarchical_follow_up_navigation_reports_nav2_completion(self):

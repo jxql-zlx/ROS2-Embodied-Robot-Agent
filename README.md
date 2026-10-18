@@ -121,9 +121,13 @@ python3 -m streamlit run web/app.py --server.port 8502
   可验证分层规划、目标检测、闭环接近和停止判定。缺少反馈接口时接近任务会失败，且不触发通用旋转恢复。
   `bash scripts/wsl_composed_navigation_vision.sh success` 会在同一 Gazebo 场景中运行分层导航、真实 YOLO 杯子检测、接近和停车复核；
   `navigation_failure`、`target_absent`、`blocked`、`vision_dropout` 和 `range_dropout` 验证导航失败、目标缺失、近障碍和传感器断流时的阶段失败与停车行为。
-  每次运行在 `/tmp/ros2_composed_navigation/` 下保存总日志和分阶段 JSON；新鲜视觉手递要求 `stale=false`、有效 `observed_at` 和不超过 2.5 秒的年龄。
+  每次运行在 `/tmp/ros2_composed_navigation/` 下保存总日志和分阶段 JSON，包含 service task UUID、阶段起止位姿，以及导航 goal / 接近动作 UUID；新鲜视觉手递要求 `stale=false`、有效 `observed_at` 和不超过 2.5 秒的年龄。
   `approach_max_steps` 默认 8（限制为 1–20），用于覆盖可视范围内先转向再接近的情况。
-  有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。
+  有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。前向测距确认要求非零且递增的 `LaserScan.header.stamp`；重复或无时间戳的消息不会计作多次独立采样，仿真时钟回退会清空旧样本。
+- **动作确认**：普通 `move` / `rotate` 任务等待执行层用相同 `command_id` 回报终态；等待期间可取消，状态超时或错误会返回失败并发出停止命令。
+  执行层拒绝非有限速度、无限/非正动作时长和超过 30 秒的单条自动动作。该上限适用于所有 `/robot_command` 来源。
+  `send_task --service` 在执行超时后会用本次请求 UUID 调用 `/task_cancel`，取消只作用于匹配的服务任务；topic 模式等待订阅者后只投递一次，ROS topic 不提供任务完成确认。
+  `TaskExecute` 与 `CancelTask` 服务定义包含 `task_id` 字段，重新构建工作区并更新生成的 ROS 接口后再使用新客户端。
   运行 `bash scripts/wsl_approach_scenarios.sh` 可对两种模式分别验证偏左、偏右、0.8/1.3 米初始距离、
   近处障碍、目标不存在、首条运动指令后视觉断流、首条运动指令后激光断流，共 16 个场景。
   脚本检查停止距离、转向方向、失败原因和任务返回后的停车状态；近障碍和缺目标时不应前进。

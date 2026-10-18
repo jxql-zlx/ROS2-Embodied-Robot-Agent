@@ -37,7 +37,7 @@ class FlashExecutor(BaseExecutor):
             self._robot, self._vision, self._llm, self._approach_stop_distance,
             max_steps=self._approach_max_steps,
             cancel_event=context.get("_cancel_event"),
-            execute_action=context.get("_execute_action"),
+            execute_action=context.get("_execute_approach_action") or context.get("_execute_action"),
         ).run(target, context.get("goal", task.name or target))
         data = {"approach": json.loads(payload) if payload else {}, "recoverable": False}
         return TaskResult(task.id, success, message, data)
@@ -47,19 +47,38 @@ class FlashExecutor(BaseExecutor):
             cancel_event = context.get("_cancel_event")
             if cancel_event is not None and cancel_event.is_set():
                 return TaskResult(task.id, False, "任务已取消", {"cancelled": True, "recoverable": False})
+            start_pose = self._pose_snapshot()
+            start_command_id = getattr(self._robot, "latest_command_id", None)
             if task.tool == "vision":
-                return self._run_vision(task)
-            if task.tool == "robot":
-                return self._run_robot(task, context)
-            if task.tool == "nav":
+                result = self._run_vision(task)
+            elif task.tool == "robot":
+                result = self._run_robot(task, context)
+            elif task.tool == "nav":
                 if self._robot is None:
-                    return TaskResult(task.id, False, "robot tool unavailable")
-                if task.action != "navigate":
-                    return TaskResult(task.id, False, f"unknown nav action: {task.action}")
-                success = self._navigate(task, context)
-                message = "navigation completed" if success else "navigation failed"
-                return TaskResult(task.id, success, message, {"recoverable": False})
-            return TaskResult(task.id, False, f"unknown tool: {task.tool}")
+                    result = TaskResult(task.id, False, "robot tool unavailable")
+                elif task.action != "navigate":
+                    result = TaskResult(task.id, False, f"unknown nav action: {task.action}")
+                else:
+                    success = self._navigate(task, context)
+                    message = "navigation completed" if success else "navigation failed"
+                    result = TaskResult(task.id, success, message, {"recoverable": False})
+            else:
+                result = TaskResult(task.id, False, f"unknown tool: {task.tool}")
+            stage_evidence = {}
+            end_pose = self._pose_snapshot()
+            if start_pose is not None:
+                stage_evidence["stage_start_pose"] = start_pose
+            if end_pose is not None:
+                stage_evidence["stage_end_pose"] = end_pose
+            goal_id = getattr(self._robot, "last_navigation_goal_id", None)
+            if goal_id:
+                stage_evidence["navigation_goal_id"] = goal_id
+            command_id = getattr(self._robot, "latest_command_id", None)
+            if command_id and command_id != start_command_id:
+                stage_evidence["last_command_id"] = command_id
+            if stage_evidence:
+                result.data.update(stage_evidence)
+            return result
         except Exception as exc:  # keep the loop alive on unexpected errors
             # An exception is not evidence that repeating the operation is
             # safe. In particular, a failed perception call must not trigger
@@ -68,12 +87,33 @@ class FlashExecutor(BaseExecutor):
                 task.id, False, f"executor error: {exc}", {"recoverable": False}
             )
 
+    def _pose_snapshot(self) -> Optional[Dict[str, float]]:
+        getter = getattr(self._robot, "get_pose", None)
+        if not callable(getter):
+            return None
+        pose = getter()
+        if not isinstance(pose, dict):
+            return None
+        try:
+            values = {key: float(pose[key]) for key in ("x", "y", "yaw")}
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in values.values()):
+            return None
+        return values
+
     def _run_vision(self, task: Task) -> TaskResult:
         if self._vision is None:
             return TaskResult(task.id, False, "vision tool unavailable")
         if task.action in ("find_object", "find"):
+            if not task.target.strip():
+                return TaskResult(
+                    task.id, False, "vision target is required", {"recoverable": False}
+                )
             data = self._vision.find_object(task.target)
-            if not self._valid_vision_result(data, require_found=True):
+            if not self._valid_vision_result(
+                data, require_found=True, expected_target=task.target
+            ):
                 return TaskResult(
                     task.id, False, "malformed vision result", {"recoverable": False}
                 )
@@ -94,7 +134,9 @@ class FlashExecutor(BaseExecutor):
             )
         return TaskResult(task.id, True, "vision ok", data={"vision": data})
 
-    def _valid_vision_result(self, data: Any, require_found: bool = False) -> bool:
+    def _valid_vision_result(
+        self, data: Any, require_found: bool = False, expected_target: str = ""
+    ) -> bool:
         """Reject malformed perception payloads before dependent work can run."""
         if not isinstance(data, dict):
             return False
@@ -106,6 +148,10 @@ class FlashExecutor(BaseExecutor):
             return False
         if require_found and not isinstance(data.get("found"), bool):
             return False
+        if require_found and data.get("found") and expected_target:
+            target = expected_target.strip().casefold()
+            if not any(target in item["name"].casefold() for item in objects):
+                return False
         if not isinstance(data.get("stale"), bool):
             return False
         # Ros2VisionTool derives these fields from the producer's Unix

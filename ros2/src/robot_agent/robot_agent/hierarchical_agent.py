@@ -10,7 +10,7 @@ from robot_agent.executor.flash_executor import FlashExecutor
 from robot_agent.llm import ChatCompletionsLLM, MockLLM
 from robot_agent.planner.base_planner import BasePlanner
 from robot_agent.planner.pro_planner import ProPlanner
-from robot_agent.planner.task_schema import Task
+from robot_agent.planner.task_schema import Task, validate_plan
 from robot_agent.task_manager.task_manager import TaskManager
 from robot_agent.task_manager.task_state import TaskStatus
 
@@ -77,6 +77,7 @@ class HierarchicalAgent:
         plan = self._planner.plan(goal)
         if cancelled():
             return cancellation_result()
+        validate_plan(plan)
         self._task_manager.add_plan(plan)
         context["goal"] = goal
         recoveries = 0
@@ -112,6 +113,7 @@ class HierarchicalAgent:
                     )
                     continue
                 recovery = self._planner.replan(goal, task, result)
+                validate_plan(recovery)
                 self._task_manager.add_plan(recovery)
                 recoveries += 1
 

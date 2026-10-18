@@ -24,6 +24,16 @@ class _Robot:
         return self.action_result
 
 
+class _EvidenceRobot(_Robot):
+    def __init__(self):
+        super().__init__()
+        self.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        self.last_navigation_goal_id = "nav-goal-uuid"
+
+    def get_pose(self):
+        return dict(self.pose)
+
+
 class _StaleVision:
     def find_object(self, _name):
         return {"found": False, "objects": [], "stale": True}
@@ -51,6 +61,16 @@ class TestFlashExecutor(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.message, "navigation completed")
         self.assertEqual(robot.calls[0][0:2], ("navigate", "1.0,0.5"))
+
+    def test_navigation_result_includes_stage_pose_and_goal_uuid(self):
+        robot = _EvidenceRobot()
+        result = FlashExecutor(robot_tool=robot).execute(
+            Task(id=1, tool="nav", action="navigate", target="1.0,0.5"), {}
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["stage_start_pose"], {"x": 0.0, "y": 0.0, "yaw": 0.0})
+        self.assertEqual(result.data["stage_end_pose"], {"x": 0.0, "y": 0.0, "yaw": 0.0})
+        self.assertEqual(result.data["navigation_goal_id"], "nav-goal-uuid")
 
     def test_navigation_failure_is_not_reported_as_success(self):
         robot = _Robot(nav_result=False)
@@ -88,6 +108,12 @@ class TestFlashExecutor(unittest.TestCase):
         )
         self.assertTrue(result.success)
 
+        wrong_target = FlashExecutor(
+            vision_tool=_PayloadVision({**payload, "objects": [{"name": "chair"}]})
+        ).execute(Task(id=1, tool="vision", action="find_object", target="cup"), {})
+        self.assertFalse(wrong_target.success)
+        self.assertEqual(wrong_target.message, "malformed vision result")
+
         for malformed in (
             {key: value for key, value in payload.items() if key != "stale"},
             {**payload, "observed_at": math.nan},
@@ -113,6 +139,13 @@ class TestFlashExecutor(unittest.TestCase):
         )
         self.assertFalse(result.success)
         self.assertEqual(result.message, "vision result is stale")
+
+    def test_find_object_requires_explicit_target(self):
+        result = FlashExecutor(vision_tool=_PayloadVision({})).execute(
+            Task(id=1, tool="vision", action="find_object", target=""), {}
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, "vision target is required")
 
     def test_legacy_visual_move_cannot_bypass_feedback_requirements(self):
         robot = _Robot()

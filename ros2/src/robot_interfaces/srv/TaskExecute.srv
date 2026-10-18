@@ -1,5 +1,6 @@
 # Natural-language task entry point (user/voice -> agent -> structured action)
 string task
+string task_id
 ---
 bool success
 string response

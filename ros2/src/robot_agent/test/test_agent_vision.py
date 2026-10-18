@@ -1,6 +1,7 @@
 """Integration-style test: the agent routes vision/approach actions to tools."""
 
 import unittest
+import time
 from unittest.mock import patch
 
 import rclpy
@@ -16,11 +17,16 @@ class _FakeVisionTool:
         self.found = found
         self.direction = direction
         self.last_query = None
+        self.max_age_sec = 2.5
+
+    @staticmethod
+    def _freshness():
+        return {"found": False, "stale": False, "observed_at": time.time(), "age_sec": 0.0}
 
     def find_object(self, name):
         self.last_query = ("find", name)
         if not self.found:
-            return {"found": False, "objects": []}
+            return {**self._freshness(), "objects": []}
         return {
             "found": True,
             "objects": [
@@ -34,11 +40,15 @@ class _FakeVisionTool:
                     "distance": None,
                 }
             ],
+            "stale": False,
+            "observed_at": time.time(),
+            "age_sec": 0.0,
         }
 
     def get_objects(self):
         self.last_query = ("scene", "")
-        return {"found": True, "objects": []}
+        return {"found": True, "objects": [], "stale": False,
+                "observed_at": time.time(), "age_sec": 0.0}
 
 
 class _FakeRobotTool:
@@ -50,6 +60,12 @@ class _FakeRobotTool:
         self.actions.append(action)
         return self.result
 
+    def status_stamp(self):
+        return (0, 0)
+
+    def wait_for_motion_complete(self, _stamp, _timeout, cancel_event=None):
+        return cancel_event is None or not cancel_event.is_set()
+
 
 class _LoopVisionTool:
     def __init__(self, scenes):
@@ -58,9 +74,11 @@ class _LoopVisionTool:
         self.wait_count = 0
         self.cutoffs = []
         self.queried_stamps = []
+        self.max_age_sec = 2.5
 
     def find_object(self, _name):
-        return dict(self.scenes[self.index])
+        return {**self.scenes[self.index], "stale": False,
+                "observed_at": time.time(), "age_sec": 0.0}
 
     def wait_for_new_scene(self, after_observed_at, timeout_sec, cancel_event=None):
         self.wait_count += 1
@@ -68,11 +86,12 @@ class _LoopVisionTool:
         if self.index + 1 >= len(self.scenes):
             return None
         self.index += 1
-        return dict(self.scenes[self.index])
+        return {**self.scenes[self.index], "stale": False,
+                "observed_at": time.time(), "age_sec": 0.0}
 
     def query_scene(self, scene, _name):
         self.queried_stamps.append(scene["observed_at"])
-        return dict(scene)
+        return {**scene, "stale": False, "observed_at": time.time(), "age_sec": 0.0}
 
 
 class _LoopRobotTool(_FakeRobotTool):
@@ -87,6 +106,9 @@ class _LoopRobotTool(_FakeRobotTool):
 
     def stop(self):
         self.actions.append({"action": "stop"})
+        return True
+
+    def wait_for_stop_confirmation(self, *_args, **_kwargs):
         return True
 
     def status_stamp(self):
@@ -173,7 +195,7 @@ class TestAgentApproachRouting(unittest.TestCase):
         self.assertEqual(vision.wait_count, 3)
         self.assertEqual(robot.wait_count, 3)
         self.assertEqual(vision.cutoffs, [100.0, 100.0, 100.0])
-        self.assertEqual(vision.queried_stamps, [101, 102, 103])
+        self.assertEqual(vision.queried_stamps, [100.0, 100.0, 100.0])
         self.assertEqual(robot.actions[0]["action"], "rotate")
         self.assertEqual(robot.actions[1]["action"], "move")
         self.assertLessEqual(robot.actions[1]["duration"], 0.5)
@@ -209,7 +231,7 @@ class TestAgentApproachRouting(unittest.TestCase):
 
     def test_approach_does_not_move_without_range_feedback(self):
         robot = _LoopRobotTool(distances=[None])
-        vision = _LoopVisionTool([{"found": True, "objects": [{"direction": "center"}]}])
+        vision = _LoopVisionTool([{"found": True, "objects": [{"name": "cup", "direction": "center"}]}])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
         ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
         self.assertFalse(ok)
@@ -218,7 +240,7 @@ class TestAgentApproachRouting(unittest.TestCase):
 
     def test_near_blind_zone_return_is_not_reported_as_arrival(self):
         robot = _LoopRobotTool(distances=[0.12])
-        vision = _LoopVisionTool([{"found": True, "objects": [{"direction": "center"}]}])
+        vision = _LoopVisionTool([{"found": True, "objects": [{"name": "cup", "direction": "center"}]}])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=vision)
         ok, response, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
         self.assertFalse(ok)

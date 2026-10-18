@@ -21,3 +21,6 @@ string params
 
 # Task source (optional, for logging / experiments)
 string source
+
+# Correlation token echoed by RobotStatus for this command.
+string command_id

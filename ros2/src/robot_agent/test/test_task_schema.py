@@ -1,8 +1,9 @@
 """Unit tests for Task / Plan schemas."""
 
 import unittest
+import math
 
-from robot_agent.planner.task_schema import Plan, Task
+from robot_agent.planner.task_schema import Plan, PlanValidationError, Task
 
 
 class TestTaskSchema(unittest.TestCase):
@@ -33,6 +34,39 @@ class TestTaskSchema(unittest.TestCase):
         self.assertEqual(restored.goal, "find cup")
         self.assertEqual(len(restored.tasks), 1)
         self.assertEqual(restored.tasks[0].target, "cup")
+
+    def test_plan_rejects_invalid_graph_and_actions(self):
+        base = {"goal": "find cup", "tasks": [
+            {"id": 1, "tool": "vision", "action": "find_object", "target": "cup"},
+            {"id": 2, "tool": "robot", "action": "approach", "target": "cup", "depends_on": [1]},
+        ]}
+        cases = (
+            {**base, "tasks": [base["tasks"][0], {**base["tasks"][1], "id": 1}]},
+            {**base, "tasks": [base["tasks"][0], {**base["tasks"][1], "depends_on": [3]}]},
+            {**base, "tasks": [{**base["tasks"][0], "depends_on": [2]}, base["tasks"][1]]},
+            {**base, "tasks": [{**base["tasks"][0], "action": "teleport"}, base["tasks"][1]]},
+            {**base, "tasks": [{**base["tasks"][0], "target": ""}, base["tasks"][1]]},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(PlanValidationError):
+                    Plan.from_dict(payload)
+
+    def test_plan_rejects_nonfinite_scores_and_motion(self):
+        for field, value in (("importance", math.nan), ("params", {"duration": math.inf})):
+            payload = {"goal": "move", "tasks": [{
+                "id": 1,
+                "tool": "robot",
+                "action": "move",
+                field: value,
+            }]}
+            with self.subTest(field=field):
+                with self.assertRaises(PlanValidationError):
+                    Plan.from_dict(payload)
+
+    def test_task_from_dict_does_not_coerce_wrong_types(self):
+        with self.assertRaises(PlanValidationError):
+            Task.from_dict({"id": "1", "tool": "vision", "action": "find_object"})
 
 
 if __name__ == "__main__":
