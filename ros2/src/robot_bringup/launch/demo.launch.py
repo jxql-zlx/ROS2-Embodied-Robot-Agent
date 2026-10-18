@@ -34,6 +34,7 @@ def generate_launch_description() -> LaunchDescription:
         package="robot_control",
         executable="robot_control_node",
         output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
     robot_agent = Node(
@@ -48,6 +49,7 @@ def generate_launch_description() -> LaunchDescription:
                 "agent_config": LaunchConfiguration("agent_config"),
                 "tool_scan_topic": LaunchConfiguration("tool_scan_topic"),
                 "cancel_service": LaunchConfiguration("cancel_service"),
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
             }
         ],
     )
@@ -64,6 +66,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("agent_config", default_value=default_agent_config),
             DeclareLaunchArgument("tool_scan_topic", default_value="/scan"),
             DeclareLaunchArgument("cancel_service", default_value="/task_cancel"),
+            DeclareLaunchArgument("use_sim_time", default_value="true"),
             sim,
             robot_control,
             robot_agent,

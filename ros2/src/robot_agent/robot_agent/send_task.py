@@ -17,6 +17,8 @@ from rclpy.node import Node
 from robot_interfaces.srv import CancelTask, TaskExecute
 from std_msgs.msg import String
 
+CANCEL_CALL_TIMEOUT_SEC = 13.0  # server budget: initial stop (2s) + Nav2 (8s) + final stop (2s)
+
 
 def publish_topic_task_once(node: Node, publisher, task: str, timeout_sec: float = 5.0) -> bool:
     """Wait briefly for the task subscriber, then enqueue exactly one message."""
@@ -65,7 +67,9 @@ def main() -> int:
                 cancel_request = CancelTask.Request()
                 cancel_request.task_id = request.task_id
                 cancel_future = cancel_client.call_async(cancel_request)
-                rclpy.spin_until_future_complete(node, cancel_future, timeout_sec=8.0)
+                rclpy.spin_until_future_complete(
+                    node, cancel_future, timeout_sec=CANCEL_CALL_TIMEOUT_SEC
+                )
                 if not cancel_future.done() or cancel_future.result() is None:
                     print("ERROR: cancellation result unknown; task may still be running")
                 else:

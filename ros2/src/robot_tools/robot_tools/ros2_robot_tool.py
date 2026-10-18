@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from threading import Condition, Event, Lock
 from typing import Any, Dict, Optional
 
@@ -47,6 +47,13 @@ def parse_nav_goal_string(goal: str) -> Optional[tuple[float, float, float]]:
 
 
 class Ros2RobotTool(Node, BaseRobotTool):
+    SCAN_MAX_SOURCE_AGE_SEC = 1.0
+    SCAN_MAX_FUTURE_SEC = 0.1
+    SCAN_CLOCK_ROLLBACK_TOLERANCE_SEC = 0.01
+    STATUS_HISTORY_LIMIT = 128
+    STATUS_HISTORY_TTL_SEC = 60.0
+    STATUS_CLOCK_ROLLBACK_TOLERANCE_SEC = 0.01
+
     def __init__(
         self,
         node_name: str = "ros2_robot_tool",
@@ -70,13 +77,18 @@ class Ros2RobotTool(Node, BaseRobotTool):
         self._last_navigation_goal_id: Optional[str] = None
         self._latest_scan: Optional[LaserScan] = None
         self._scan_received_at = 0.0
+        self._latest_scan_stamp_ns: Optional[int] = None
         self._last_scan_stamp_ns: Optional[int] = None
+        self._last_scan_ros_now_ns: Optional[int] = None
         self._scan_condition = Condition()
         self._scan_history = deque(maxlen=10)
         self._scan_sub = self.create_subscription(
             LaserScan, scan_topic, self._on_scan, qos_profile_sensor_data
         )
         self._status_condition = Condition()
+        self._status_history = OrderedDict()
+        self._status_clock_epoch = 0
+        self._last_status_ros_now_ns: Optional[int] = None
         self.get_logger().info(
             f"Ros2RobotTool ready: cmd->{command_topic}, odom->{odom_topic}, "
             f"status->{status_topic}, nav->{navigate_server}"
@@ -98,9 +110,67 @@ class Ros2RobotTool(Node, BaseRobotTool):
         }
 
     def _on_status(self, msg: RobotStatus) -> None:
+        command_id = str(getattr(msg, "command_id", "") or "").strip()
+        now = time.monotonic()
+        ros_now_ns = self._ros_time_ns()
         with self._status_condition:
-            self._latest_status = msg
+            self._sync_status_clock_epoch_locked(ros_now_ns)
+            source_stamp_ns = self._status_time_ns(msg)
+            if (ros_now_ns > 0 and source_stamp_ns is not None
+                    and source_stamp_ns - ros_now_ns >
+                    self.SCAN_MAX_FUTURE_SEC * 1_000_000_000):
+                # A delayed pre-reset status can arrive after the clock has
+                # restarted. Do not let its old-epoch stamp become a baseline.
+                self._status_condition.notify_all()
+                return
+            # Preserve the latest global snapshot for the existing status API,
+            # while keeping a separate bounded receipt per command for waits.
+            previous = self._status_history.get(command_id) if command_id else None
+            if command_id:
+                terminal = {"done", "stopped", "error"}
+                if previous is None or previous[0].state not in terminal:
+                    old_stamp = self._status_time_ns(previous[0]) if previous else None
+                    new_stamp = self._status_time_ns(msg)
+                    if old_stamp is None or new_stamp is None or new_stamp >= old_stamp:
+                        self._status_history[command_id] = (msg, now)
+                        self._status_history.move_to_end(command_id)
+                self._prune_status_history(now)
+            current_stamp = self._status_time_ns(self._latest_status) if self._latest_status else None
+            incoming_stamp = self._status_time_ns(msg)
+            if (self._latest_status is None or current_stamp is None or incoming_stamp is None
+                    or incoming_stamp >= current_stamp):
+                self._latest_status = msg
             self._status_condition.notify_all()
+
+    @staticmethod
+    def _status_time_ns(status: Optional[RobotStatus]) -> Optional[int]:
+        if status is None:
+            return None
+        stamp = getattr(status, "stamp", None)
+        if stamp is None:
+            return None
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _prune_status_history(self, now: float) -> None:
+        cutoff = now - self.STATUS_HISTORY_TTL_SEC
+        for command_id, (_status, received_at) in list(self._status_history.items()):
+            if received_at >= cutoff:
+                break
+            del self._status_history[command_id]
+        while len(self._status_history) > self.STATUS_HISTORY_LIMIT:
+            self._status_history.popitem(last=False)
+
+    def _ros_time_ns(self) -> int:
+        return int(self.get_clock().now().nanoseconds)
+
+    def _sync_status_clock_epoch_locked(self, ros_now_ns: int) -> None:
+        previous = self._last_status_ros_now_ns
+        tolerance_ns = self.STATUS_CLOCK_ROLLBACK_TOLERANCE_SEC * 1_000_000_000
+        if previous is not None and ros_now_ns + tolerance_ns < previous:
+            self._status_history.clear()
+            self._latest_status = None
+            self._status_clock_epoch += 1
+        self._last_status_ros_now_ns = ros_now_ns
 
     def _on_scan(self, msg: LaserScan) -> None:
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
@@ -108,17 +178,37 @@ class Ros2RobotTool(Node, BaseRobotTool):
             # Without a source timestamp, repeated delivery cannot be
             # distinguished from a new measurement and must not confirm range.
             return
+        now_ros_ns = self._ros_time_ns()
+        if now_ros_ns <= 0:
+            return
         with self._scan_condition:
+            clock_reset = (
+                self._last_scan_ros_now_ns is not None
+                and now_ros_ns + self.SCAN_CLOCK_ROLLBACK_TOLERANCE_SEC * 1_000_000_000
+                < self._last_scan_ros_now_ns
+            )
+            if clock_reset:
+                self._scan_history.clear()
+                self._latest_scan = None
+                self._latest_scan_stamp_ns = None
+                self._last_scan_stamp_ns = None
+            elif self._last_scan_stamp_ns is not None and stamp_ns < self._last_scan_stamp_ns:
+                # A single late/out-of-order sample is not evidence of a clock
+                # reset; discard it without changing the current scan snapshot.
+                self._last_scan_ros_now_ns = now_ros_ns
+                return
+            self._last_scan_ros_now_ns = now_ros_ns
             if self._last_scan_stamp_ns == stamp_ns:
                 return
-            if self._last_scan_stamp_ns is not None and stamp_ns < self._last_scan_stamp_ns:
-                # Simulation time can restart with a fresh world. Drop old
-                # samples rather than treating new-epoch stamps as stale.
-                self._scan_history.clear()
+            source_age_ns = now_ros_ns - stamp_ns
+            if (source_age_ns > self.SCAN_MAX_SOURCE_AGE_SEC * 1_000_000_000
+                    or source_age_ns < -self.SCAN_MAX_FUTURE_SEC * 1_000_000_000):
+                return
             self._last_scan_stamp_ns = stamp_ns
             self._latest_scan = msg
+            self._latest_scan_stamp_ns = stamp_ns
             self._scan_received_at = time.monotonic()
-            self._scan_history.append((self._scan_received_at, self.front_range(msg)))
+            self._scan_history.append((self._scan_received_at, self.front_range(msg), stamp_ns))
             self._scan_condition.notify_all()
 
     def wait_for_front_range(self, timeout_sec: float = 3.0, cancel_event=None) -> Dict[str, Any]:
@@ -129,14 +219,26 @@ class Ros2RobotTool(Node, BaseRobotTool):
                 if cancel_event is not None and cancel_event.is_set():
                     return {"name": "front_range", "available": False, "distance": None,
                             "cancelled": True}
-                samples = [value for stamp, value in self._scan_history if stamp > started + 0.5]
+                samples = [sample for sample in self._scan_history if sample[0] > started + 0.5]
                 recent = samples[-3:]
-                if len(recent) == 3 and all(value is not None for value in recent):
+                now_ros_ns = self._ros_time_ns()
+                source_ages = [
+                    (now_ros_ns - sample[2]) / 1e9
+                    for sample in recent if len(sample) > 2
+                ]
+                source_fresh = (len(source_ages) == 3 and all(
+                    -self.SCAN_MAX_FUTURE_SEC <= age <= self.SCAN_MAX_SOURCE_AGE_SEC
+                    for age in source_ages
+                ))
+                if (len(recent) == 3 and all(sample[1] is not None for sample in recent)
+                        and source_fresh):
                     scan = getattr(self, "_latest_scan", None)
                     blind_margin = scan.range_min + 0.05 if scan is not None else 0.0
-                    if min(recent) > blind_margin and max(recent) - min(recent) <= 0.03:
+                    values = [sample[1] for sample in recent]
+                    if min(values) > blind_margin and max(values) - min(values) <= 0.03:
                         return {"name": "front_range", "available": True,
-                                "distance": sorted(recent)[1], "frame_id": "lidar_link"}
+                                "distance": sorted(values)[1], "frame_id": "lidar_link",
+                                "source_age_sec": max(source_ages)}
                 remaining = started + timeout_sec - time.monotonic()
                 if remaining <= 0:
                     return {"name": "front_range", "available": False, "distance": None}
@@ -165,7 +267,9 @@ class Ros2RobotTool(Node, BaseRobotTool):
 
     def status_stamp(self) -> Optional[tuple[int, int]]:
         """Return a snapshot token for waiting on a later motion status."""
+        ros_now_ns = self._ros_time_ns()
         with self._status_condition:
+            self._sync_status_clock_epoch_locked(ros_now_ns)
             stamp = self._latest_status.stamp if self._latest_status else None
             return (stamp.sec, stamp.nanosec) if stamp is not None else None
 
@@ -181,18 +285,25 @@ class Ros2RobotTool(Node, BaseRobotTool):
         command_id: Optional[str] = None,
     ) -> bool:
         """Wait for a move/rotate command to report a terminal status."""
+        if not command_id:
+            return False
         deadline = time.monotonic() + max(0.0, timeout_sec)
         with self._status_condition:
+            self._sync_status_clock_epoch_locked(self._ros_time_ns())
+            wait_epoch = self._status_clock_epoch
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     return False
-                status = self._latest_status
+                self._sync_status_clock_epoch_locked(self._ros_time_ns())
+                if self._status_clock_epoch != wait_epoch:
+                    return False
+                self._prune_status_history(time.monotonic())
+                item = self._status_history.get(command_id)
+                status = item[0] if item else None
                 if status is not None:
                     stamp = (status.stamp.sec, status.stamp.nanosec)
                     is_new = after_stamp is None or stamp > after_stamp
-                    expected_id = command_id or self._latest_command_id
-                    id_matches = expected_id is None or status.command_id == expected_id
-                    if is_new and id_matches and status.action in ("move", "rotate"):
+                    if is_new and status.action in ("move", "rotate"):
                         if status.state == "error":
                             return False
                         if status.state in ("done", "stopped"):
@@ -210,18 +321,25 @@ class Ros2RobotTool(Node, BaseRobotTool):
         command_id: Optional[str] = None,
     ) -> bool:
         """Wait for the control layer to confirm this stop command."""
+        if not command_id:
+            return False
         deadline = time.monotonic() + max(0.0, timeout_sec)
         with self._status_condition:
+            self._sync_status_clock_epoch_locked(self._ros_time_ns())
+            wait_epoch = self._status_clock_epoch
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     return False
-                status = self._latest_status
+                self._sync_status_clock_epoch_locked(self._ros_time_ns())
+                if self._status_clock_epoch != wait_epoch:
+                    return False
+                self._prune_status_history(time.monotonic())
+                item = self._status_history.get(command_id)
+                status = item[0] if item else None
                 if status is not None:
                     stamp = (status.stamp.sec, status.stamp.nanosec)
                     is_new = after_stamp is None or stamp > after_stamp
-                    expected_id = command_id or self._latest_command_id
-                    id_matches = expected_id is None or status.command_id == expected_id
-                    if is_new and id_matches and status.action == "stop":
+                    if is_new and status.action == "stop":
                         return status.state == "stopped"
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -489,12 +607,23 @@ class Ros2RobotTool(Node, BaseRobotTool):
 
     def get_sensor(self, name: str) -> Dict[str, Any]:
         if name == "front_range":
-            scan = self._latest_scan
-            age = time.monotonic() - self._scan_received_at
-            distance = self.front_range(scan) if scan is not None and age <= 1.0 else None
+            with self._scan_condition:
+                scan = self._latest_scan
+                received_at = self._scan_received_at
+                source_stamp_ns = self._latest_scan_stamp_ns
+                age = time.monotonic() - received_at
+                now_ros_ns = self._ros_time_ns()
+                source_age = ((now_ros_ns - source_stamp_ns) / 1e9
+                              if source_stamp_ns is not None and now_ros_ns > 0 else None)
+                distance = self.front_range(scan) if (
+                    scan is not None and age <= self.SCAN_MAX_SOURCE_AGE_SEC
+                    and source_age is not None
+                    and -self.SCAN_MAX_FUTURE_SEC <= source_age <= self.SCAN_MAX_SOURCE_AGE_SEC
+                ) else None
             return {
                 "name": name, "available": distance is not None,
                 "distance": distance, "age_sec": age,
+                "source_age_sec": source_age,
                 "frame_id": "lidar_link",
             }
         # Reserved interface: real sensor topics (camera /scan) land in the

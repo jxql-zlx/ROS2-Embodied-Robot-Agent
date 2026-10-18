@@ -38,8 +38,18 @@ class FlashExecutor(BaseExecutor):
             max_steps=self._approach_max_steps,
             cancel_event=context.get("_cancel_event"),
             execute_action=context.get("_execute_approach_action") or context.get("_execute_action"),
+            stop_and_confirm=context.get("_stop_and_confirm"),
+            motion_wait_managed=callable(
+                context.get("_execute_approach_action") or context.get("_execute_action")
+            ),
         ).run(target, context.get("goal", task.name or target))
-        data = {"approach": json.loads(payload) if payload else {}, "recoverable": False}
+        data = {
+            "approach": json.loads(payload) if payload else {},
+            "recoverable": False,
+            "task_tool": task.tool,
+            "task_action": task.action,
+            "target": target,
+        }
         return TaskResult(task.id, success, message, data)
 
     def execute(self, task: Task, context: Dict[str, Any]) -> TaskResult:
@@ -65,6 +75,9 @@ class FlashExecutor(BaseExecutor):
             else:
                 result = TaskResult(task.id, False, f"unknown tool: {task.tool}")
             stage_evidence = {}
+            result.data.setdefault("task_tool", task.tool)
+            result.data.setdefault("task_action", task.action)
+            result.data.setdefault("target", task.target)
             end_pose = self._pose_snapshot()
             if start_pose is not None:
                 stage_evidence["stage_start_pose"] = start_pose

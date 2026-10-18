@@ -64,11 +64,13 @@ LOG="/tmp/vision_action_demo_${AGENT_MODE}_${SCENARIO}.log"
 export GAZEBO_MODEL_PATH="$MODELS:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI=""
 
-setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false agent_mode:="$AGENT_MODE" tool_scan_topic:="$SCAN_TOPIC" > "$LOG" 2>&1 &
+setsid ros2 launch robot_bringup demo.launch.py world:="$WORLD" gui:=false rviz:=false \
+  agent_mode:="$AGENT_MODE" tool_scan_topic:="$SCAN_TOPIC" use_sim_time:=true > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
 setsid python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
   --ros-args -p model_path:="$MODEL" -p camera_topic:=/camera/image_raw -p conf:=0.25 \
+  -p use_sim_time:=true \
   > /tmp/vision_action_node.log 2>&1 &
 VISION_PID=$!
 FAULT_PID=""
@@ -176,8 +178,9 @@ if isinstance(data, list):
     approaches = [entry["data"]["approach"] for entry in data
                   if entry.get("success") and "approach" in entry.get("data", {})]
     data = approaches[-1] if approaches else {}
-distance = data.get("distance")
-if dist >= 0.05 and data.get("available") and isinstance(distance, (int, float)) and 0.4 <= distance <= 0.65:
+clearance = data.get("clearance", data)
+distance = clearance.get("distance")
+if dist >= 0.05 and clearance.get("available") and isinstance(distance, (int, float)) and 0.4 <= distance <= 0.65:
     yaw = final_yaw
     if scenario in ("left", "right") and yaw * (1 if scenario == "left" else -1) < 0.1:
         raise SystemExit("FAIL: robot did not turn toward the side target")

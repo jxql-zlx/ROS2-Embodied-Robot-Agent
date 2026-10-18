@@ -68,6 +68,10 @@ class HierarchicalAgent:
 
         if cancelled():
             return cancellation_result()
+        # A HierarchicalAgent may be reused by the node. Previous pending tasks
+        # (for example, dependents left behind by cancellation) belong to the
+        # old goal and must not enter this run's scheduler.
+        self._task_manager.clear()
         if is_simple(goal):
             task = Task(id=0, tool="robot", action="infer", target=goal, name=goal)
             context["goal"] = goal

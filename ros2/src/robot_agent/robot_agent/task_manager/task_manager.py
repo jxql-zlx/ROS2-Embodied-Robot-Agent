@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Dict, List, Optional
 
-from robot_agent.planner.task_schema import Plan, Task
+from robot_agent.planner.task_schema import Plan, Task, validate_plan
 from robot_agent.task_manager.scheduler import Scheduler
 from robot_agent.task_manager.task_state import TaskStatus
 
@@ -18,6 +19,10 @@ class TaskManager:
         self._tasks[task.id] = task
 
     def add_plan(self, plan: Plan) -> None:
+        validate_plan(plan)
+        # ID remapping is local to this manager; don't mutate planner-owned plans
+        # that may be returned again during a retry or a later run.
+        plan = deepcopy(plan)
         used_ids = set(self._tasks)
         next_id = max(used_ids, default=0) + 1
         remap: Dict[int, int] = {}
@@ -55,3 +60,7 @@ class TaskManager:
 
     def tasks(self) -> List[Task]:
         return list(self._tasks.values())
+
+    def clear(self) -> None:
+        """Discard all state from a completed, failed, or cancelled run."""
+        self._tasks.clear()

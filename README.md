@@ -1,7 +1,7 @@
 # ROS2 Multimodal Embodied Robot Agent System
 
-> 状态：**P0–P7 已落地**：ROS2 闭环、视觉感知（YOLO）、
-> Vision→Language→Action 闭环、分层 LLM Agent、SLAM + Nav2 自主导航。
+> 当前具备 ROS2 闭环、视觉感知（YOLO）、Vision→Language→Action、
+> 分层 LLM Agent、SLAM + Nav2 的仿真演示能力；具体测试范围和剩余边界见下方说明及验证记录。
 > 面向具身智能的多模态机器人智能体系统，独立演进。
 
 ## 定位
@@ -113,9 +113,11 @@ python3 -m streamlit run web/app.py --server.port 8502
 - **视觉目标**：Gazebo 世界 `cup.world` 含一个 `model://cup` 贴图杯；
   运行视觉 demo 前脚本会自动设置 `GAZEBO_MODEL_PATH` / `GAZEBO_MODEL_DATABASE_URI`。
 - **接近完成判定（simple / hierarchical 共用）**：目标在图像中居中，且 `/scan` 前方 ±10° 的有效距离
-  达到 `approach_stop_distance`（默认距 `lidar_link` 0.65 米）时停止。每步动作最多 0.5 秒，
+  进入安全制动边界时停止。边界由 `approach_stop_distance`（默认 0.65 米）、0.08 米制动余量、
+  最大速度 0.3 m/s 和控制周期共同计算，默认约距 `lidar_link` 0.79 米。每步动作最多 0.5 秒，
   动作结束后等待底盘稳定、三次一致激光读数和新视觉帧；无测距或读数异常时返回失败。
   此策略用于目标正前方无遮挡的 Demo，尚未将激光回波与具体物体做三维关联。
+  达到安全边界表示已停止接近并确认控制层处理 stop；结果不据此确认杯子表面距离、目标到达或物理静止。
   Demo 脚本会重建相关包并检查服务成功、实际位移和最终测距。
   用 `bash scripts/wsl_vision_action_demo.sh hierarchical "找到杯子然后移动过去"`
   可验证分层规划、目标检测、闭环接近和停止判定。缺少反馈接口时接近任务会失败，且不触发通用旋转恢复。
@@ -123,11 +125,14 @@ python3 -m streamlit run web/app.py --server.port 8502
   `navigation_failure`、`target_absent`、`blocked`、`vision_dropout` 和 `range_dropout` 验证导航失败、目标缺失、近障碍和传感器断流时的阶段失败与停车行为。
   每次运行在 `/tmp/ros2_composed_navigation/` 下保存总日志和分阶段 JSON，包含 service task UUID、阶段起止位姿，以及导航 goal / 接近动作 UUID；新鲜视觉手递要求 `stale=false`、有效 `observed_at` 和不超过 2.5 秒的年龄。
   `approach_max_steps` 默认 8（限制为 1–20），用于覆盖可视范围内先转向再接近的情况。
-  有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。前向测距确认要求非零且递增的 `LaserScan.header.stamp`；重复或无时间戳的消息不会计作多次独立采样，仿真时钟回退会清空旧样本。
+  有效激光扫描的正无穷读数表示量程内无回波；缺帧和 NaN 不按空旷通道处理。前向测距同时检查接收年龄和 ROS 源时间戳年龄；重复、乱序、无时间戳和过期的消息不计作新采样。
+  仿真启动统一使用 `use_sim_time:=true`，真实设备应使用其实际时钟配置。只有确认 ROS 时钟回退才重置历史；旧时钟会话的状态等待失败关闭，新命令重新确认。
+  视觉 `observed_at` 当前是图像处理回调开始的 Unix 时间；相机源采样时间和排队延迟尚未单独验证。
 - **动作确认**：普通 `move` / `rotate` 任务等待执行层用相同 `command_id` 回报终态；等待期间可取消，状态超时或错误会返回失败并发出停止命令。
   执行层拒绝非有限速度、无限/非正动作时长和超过 30 秒的单条自动动作。该上限适用于所有 `/robot_command` 来源。
   `send_task --service` 在执行超时后会用本次请求 UUID 调用 `/task_cancel`，取消只作用于匹配的服务任务；topic 模式等待订阅者后只投递一次，ROS topic 不提供任务完成确认。
   `TaskExecute` 与 `CancelTask` 服务定义包含 `task_id` 字段，重新构建工作区并更新生成的 ROS 接口后再使用新客户端。
+  尚未完成的取消保留任务归属，即使执行函数已返回，同一 UUID 仍可重试停止确认。控制状态确认成功只证明执行层处理了 stop；物理静止由仿真验收中的连续新鲜里程计另行验证。
   运行 `bash scripts/wsl_approach_scenarios.sh` 可对两种模式分别验证偏左、偏右、0.8/1.3 米初始距离、
   近处障碍、目标不存在、首条运动指令后视觉断流、首条运动指令后激光断流，共 16 个场景。
   脚本检查停止距离、转向方向、失败原因和任务返回后的停车状态；近障碍和缺目标时不应前进。
@@ -140,6 +145,7 @@ python3 -m streamlit run web/app.py --server.port 8502
   验证取消终态、停车后的新鲜里程计和跟进导航到位；每次运行的日志保存在独立临时目录中。
   取消场景会同时核验 Nav2 目标状态历史、`map→base_footprint` 到位误差、里程计时间戳递增、采样连续性、线速度和航向漂移；标准输出与错误输出均保存在每次运行独立目录中。hierarchical 模式也支持组合任务
   `导航到 1.0,0.5，然后找杯子并靠近`，按导航成功、视觉找到目标、闭环接近的顺序执行；前一步失败或中途取消会阻止后续步骤。
+  本轮逐项实现清单与运行证据见 [Luna 执行清单](docs/roadmap/2026-10-18-luna-next/task_plan.md) 和 [验证记录](docs/roadmap/2026-10-18-luna-next/validation.md)。未执行的场景在记录中保留为待验证。
 - **LLM provider**：默认 `mock`（离线可用）。使用 DeepSeek 时设置环境变量
   `DEEPSEEK_API_KEY`，并 `ros2 launch ... llm_provider:=deepseek`；
   仓库**不提交任何 API key**，请勿把密钥写入代码或 `.env` 提交。

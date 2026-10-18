@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from robot_agent.action_plan import ActionPlan
-from robot_agent.planner.task_schema import Plan, Task
+from robot_agent.planner.task_schema import Plan, Task, validate_plan
 from robot_agent.prompt import MOTION_PROMPT, PLAN_PROMPT, SYSTEM_PROMPT, parse_action_json
 
 
@@ -244,7 +244,9 @@ class MockLLM(BaseLLM):
                     name=f"approach {target}", depends_on=[2],
                 ),
             ))
-            return Plan(goal=goal, tasks=tasks)
+            plan = Plan(goal=goal, tasks=tasks)
+            validate_plan(plan)
+            return plan
         if any(w in text for w in ("找", "find", "search", "观察", "看到", "detect", "靠近", "approach")):
             target = self._extract_vision_target(goal)
             nid += 1
@@ -292,7 +294,9 @@ class MockLLM(BaseLLM):
                     dependency=0,
                 )
             )
-        return Plan(goal=goal, tasks=tasks)
+        plan = Plan(goal=goal, tasks=tasks)
+        validate_plan(plan)
+        return plan
 
 
 # ---------------------------------------------------------------------------

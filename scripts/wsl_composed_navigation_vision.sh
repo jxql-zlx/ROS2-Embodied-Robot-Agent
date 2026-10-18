@@ -110,7 +110,8 @@ setsid ros2 launch robot_bringup navigation.launch.py mode:=localization \
 NAV_PID=$!
 python3 "$SCRIPTS_DIR/navigation_smoke_client.py" check-localization \
   > "$LOG_DIR/localization_check.log" 2>&1
-setsid ros2 run robot_control robot_control_node > "$LOG_DIR/control.log" 2>&1 &
+setsid ros2 run robot_control robot_control_node --ros-args -p use_sim_time:=true \
+  > "$LOG_DIR/control.log" 2>&1 &
 CONTROL_PID=$!
 SCAN_TOPIC=/scan
 APPROACH_STOP_DISTANCE=0.65
@@ -119,12 +120,13 @@ if [ "$SCENARIO" = vision_dropout ] || [ "$SCENARIO" = range_dropout ]; then
 fi
 if [ "$SCENARIO" = range_dropout ]; then SCAN_TOPIC=/approach_test/scan; fi
 setsid ros2 run robot_agent robot_agent_node --ros-args -p mode:=hierarchical \
+  -p use_sim_time:=true \
   -p "tool_scan_topic:=${SCAN_TOPIC}" -p "approach_stop_distance:=${APPROACH_STOP_DISTANCE}" \
   > "$LOG_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 setsid python3 "$REPO_ROOT/vision/ros2_vision_node.py" \
   --ros-args -p model_path:="$REPO_ROOT/models/yolov8n.pt" \
-  -p camera_topic:=/camera/image_raw -p conf:=0.25 \
+  -p camera_topic:=/camera/image_raw -p conf:=0.25 -p use_sim_time:=true \
   > "$LOG_DIR/vision.log" 2>&1 &
 VISION_PID=$!
 if [ "$SCENARIO" = vision_dropout ] || [ "$SCENARIO" = range_dropout ]; then
@@ -218,9 +220,14 @@ if scenario == "success":
             not math.isfinite(detected["age_sec"]) or not 0 <= detected["age_sec"] <= 2.5):
         raise SystemExit(f"FAIL: navigation handed off missing, malformed, or stale metadata: {detected}")
     approach = results[2].get("data", {}).get("approach", {})
-    distance = approach.get("distance")
-    if not approach.get("available") or not isinstance(distance, (int, float)) or not 0.4 <= distance <= 0.65:
-        raise SystemExit(f"FAIL: approach did not verify the stop distance: {approach}")
+    clearance = approach.get("clearance", approach)
+    distance = clearance.get("distance")
+    if not clearance.get("available") or not isinstance(distance, (int, float)) or not 0.4 <= distance <= 0.79:
+        raise SystemExit(f"FAIL: approach did not verify the safe stopping clearance: {approach}")
+    if (approach.get("target_arrival_confirmed") is not False or
+            approach.get("stop_confirmation_type") != "control_ack" or
+            approach.get("physical_stop_confirmed") is not False):
+        raise SystemExit(f"FAIL: approach stop evidence is incomplete or overstated: {approach}")
     for stage in results[:3]:
         data = stage.get("data", {})
         if not isinstance(data.get("stage_start_pose"), dict) or not isinstance(data.get("stage_end_pose"), dict):
@@ -257,8 +264,9 @@ elif scenario in ("blocked", "vision_dropout", "range_dropout"):
         raise SystemExit(f"FAIL: wrong {scenario} response: {response}")
     if scenario == "blocked":
         approach = results[2].get("data", {}).get("approach", {})
-        if (not approach.get("available") or not isinstance(approach.get("distance"), (int, float))
-                or approach["distance"] >= 0.4):
+        clearance = approach.get("clearance", approach)
+        if (not clearance.get("available") or not isinstance(clearance.get("distance"), (int, float))
+                or clearance["distance"] >= 0.4):
             raise SystemExit(f"FAIL: blocked scenario did not verify close obstacle: {approach}")
         start = results[2]["data"].get("stage_start_pose")
         end = results[2]["data"].get("stage_end_pose")

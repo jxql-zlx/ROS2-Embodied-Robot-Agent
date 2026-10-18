@@ -3,7 +3,7 @@
 import unittest
 import math
 
-from robot_agent.planner.task_schema import Plan, PlanValidationError, Task
+from robot_agent.planner.task_schema import Plan, PlanValidationError, Task, validate_plan
 
 
 class TestTaskSchema(unittest.TestCase):
@@ -67,6 +67,20 @@ class TestTaskSchema(unittest.TestCase):
     def test_task_from_dict_does_not_coerce_wrong_types(self):
         with self.assertRaises(PlanValidationError):
             Task.from_dict({"id": "1", "tool": "vision", "action": "find_object"})
+
+    def test_action_params_reject_unknown_fields_and_invalid_numbers(self):
+        cases = (
+            Task(id=1, tool="nav", action="navigate", target="1,2", params={"retries": 2}),
+            Task(id=1, tool="nav", action="navigate", target="1,2", params={"timeout": True}),
+            Task(id=1, tool="nav", action="navigate", target="1,2", params={"timeout": 0}),
+            Task(id=1, tool="robot", action="move", params={"linear_x": "0.3"}),
+            Task(id=1, tool="robot", action="move", params={"linear_x": 1.1}),
+            Task(id=1, tool="robot", action="move", params={"duration": -1}),
+            Task(id=1, tool="robot", action="stop", params={"duration": 1}),
+        )
+        for task in cases:
+            with self.subTest(task=task), self.assertRaises(PlanValidationError):
+                validate_plan(Plan(goal="validate task", tasks=[task]))
 
 
 if __name__ == "__main__":

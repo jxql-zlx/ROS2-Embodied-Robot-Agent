@@ -82,12 +82,14 @@ setsid ros2 launch robot_bringup navigation.launch.py mode:=localization \
   "map:=${MAP_PREFIX}.yaml" > "$LOG_DIR/navigation.log" 2>&1 &
 NAV_PID=$!
 python3 "$REPO_ROOT/scripts/navigation_smoke_client.py" check-localization
-setsid ros2 run robot_control robot_control_node > "$LOG_DIR/control.log" 2>&1 &
+setsid ros2 run robot_control robot_control_node --ros-args -p use_sim_time:=true \
+  > "$LOG_DIR/control.log" 2>&1 &
 CONTROL_PID=$!
 
 for mode in "${MODES[@]}"; do
   echo "[Nav2 cancellation scenario] mode=$mode"
-  setsid ros2 run robot_agent robot_agent_node --ros-args -p "mode:=${mode}" \
+  setsid ros2 run robot_agent robot_agent_node --ros-args \
+    -p use_sim_time:=true -p "mode:=${mode}" \
     > "$LOG_DIR/agent_${mode}.log" 2>&1 &
   AGENT_PID=$!
   wait_service /task_execute

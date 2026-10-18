@@ -55,15 +55,17 @@ class _FakeRobotTool:
     def __init__(self, result=True):
         self.actions = []
         self.result = result
+        self.latest_command_id = None
 
     def execute_action(self, action):
         self.actions.append(action)
+        self.latest_command_id = f"motion-{len(self.actions)}"
         return self.result
 
     def status_stamp(self):
         return (0, 0)
 
-    def wait_for_motion_complete(self, _stamp, _timeout, cancel_event=None):
+    def wait_for_motion_complete(self, _stamp, _timeout, cancel_event=None, command_id=None):
         return cancel_event is None or not cancel_event.is_set()
 
 
@@ -106,6 +108,7 @@ class _LoopRobotTool(_FakeRobotTool):
 
     def stop(self):
         self.actions.append({"action": "stop"})
+        self.latest_command_id = f"stop-{len(self.actions)}"
         return True
 
     def wait_for_stop_confirmation(self, *_args, **_kwargs):
@@ -114,7 +117,7 @@ class _LoopRobotTool(_FakeRobotTool):
     def status_stamp(self):
         return (0, self.wait_count)
 
-    def wait_for_motion_complete(self, _after_stamp, _timeout_sec, cancel_event=None):
+    def wait_for_motion_complete(self, _after_stamp, _timeout_sec, cancel_event=None, command_id=None):
         self.wait_count += 1
         return True
 
@@ -251,11 +254,11 @@ class TestAgentApproachRouting(unittest.TestCase):
         scenes = [{"found": True, "observed_at": stamp, "objects": [
             {"name": "cup", "direction": "center"}
         ]} for stamp in (1, 2)]
-        robot = _LoopRobotTool(distances=[0.7, 0.62])
+        robot = _LoopRobotTool(distances=[0.8, 0.62])
         self.agent = RobotAgentNode(llm=MockLLM(), tool=robot, vision_tool=_LoopVisionTool(scenes))
         ok, _, _ = self.agent._handle_approach(ActionPlan("approach", goal="cup"), "找杯子")
         self.assertTrue(ok)
-        self.assertAlmostEqual(robot.actions[0]["duration"], (0.7 - 0.65) / 0.3)
+        self.assertAlmostEqual(robot.actions[0]["duration"], (0.8 - 0.65 - 0.08 - 0.3 * 0.1) / 0.3)
 
 
 if __name__ == "__main__":

@@ -154,6 +154,15 @@ def _map_goal_error(node, goal):
     return math.hypot(pose[0] - goal[0], pose[1] - goal[1])
 
 
+def _validate_goal_uuid(goal_id, label):
+    try:
+        parsed = uuid.UUID(hex=goal_id)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise RuntimeError(f"{label} is not a UUID: {goal_id!r}") from exc
+    if parsed.int == 0:
+        raise RuntimeError(f"{label} must not be the all-zero UUID")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "simple"
     if mode not in ("simple", "hierarchical"):
@@ -162,6 +171,8 @@ def main():
     rclpy.init()
     node = NavigationCancellationScenario()
     task_future = None
+    active_task_future = None
+    active_task_id = None
     scenario_passed = False
     try:
         if not node.task_client.wait_for_service(timeout_sec=10.0):
@@ -179,9 +190,13 @@ def main():
         start_sample_index = len(node.odom_samples) - 1
         known_goal_ids = set(node.navigation_statuses)
         request = TaskExecute.Request()
-        request.task = f"导航到 {navigation_goal_x},0,0，然后找杯子并靠近"
+        request.task = (f"导航到 {navigation_goal_x},0,0，然后找杯子并靠近"
+                        if mode == "hierarchical"
+                        else f"导航到 {navigation_goal_x},0,0")
         request.task_id = uuid.uuid4().hex
         task_future = node.task_client.call_async(request)
+        active_task_future = task_future
+        active_task_id = request.task_id
         active_statuses = {GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING}
         scenario_goal = {}
 
@@ -193,12 +208,42 @@ def main():
                     return True
             return False
 
-        saw_active_navigation = node.spin_until(find_new_active_goal, 10.0)
+        saw_active_navigation = node.spin_until(
+            lambda: find_new_active_goal() or task_future.done(), 10.0
+        )
+        if task_future.done():
+            early_response = task_future.result()
+            raise RuntimeError(
+                "task finished before Nav2 became active: "
+                f"success={early_response.success}, response={early_response.response!r}, "
+                f"action_json={early_response.action_json!r}"
+            )
         goal_id = scenario_goal.get("id")
-        moved = saw_active_navigation and node.spin_until(
-            lambda: node.goal_status(goal_id) in active_statuses and node.pose is not None and
-            math.hypot(node.pose[0] - start_pose[0], node.pose[1] - start_pose[1]) >= 0.25,
+        if goal_id is None:
+            raise RuntimeError(
+                "no new active Nav2 goal was observed; "
+                f"statuses={node.navigation_status_diagnostic()}"
+            )
+        _validate_goal_uuid(goal_id, "scenario Nav2 goal id")
+        saw_motion_or_finish = saw_active_navigation and node.spin_until(
+            lambda: (
+                node.goal_status(goal_id) in active_statuses and node.pose is not None and
+                math.hypot(node.pose[0] - start_pose[0], node.pose[1] - start_pose[1]) >= 0.25
+            ) or task_future.done(),
             45.0,
+        )
+        if task_future.done():
+            early_response = task_future.result()
+            raise RuntimeError(
+                "task finished before navigation moved at least 0.25 m: "
+                f"success={early_response.success}, response={early_response.response!r}, "
+                f"action_json={early_response.action_json!r}"
+            )
+        moved = bool(
+            saw_motion_or_finish
+            and node.goal_status(goal_id) in active_statuses
+            and node.pose is not None
+            and math.hypot(node.pose[0] - start_pose[0], node.pose[1] - start_pose[1]) >= 0.25
         )
         if not moved:
             samples = node.odom_samples[start_sample_index:]
@@ -242,9 +287,39 @@ def main():
         try:
             cancelled_results = json.loads(task_response.action_json)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"cancelled composite task returned invalid stage log: {exc}") from exc
-        if any(item.get("task_id") in (2, 3) for item in cancelled_results):
-            raise RuntimeError(f"cancellation allowed dependent stages to run: {cancelled_results}")
+            raise RuntimeError(f"cancelled task returned invalid action_json: {exc}") from exc
+        if mode == "simple":
+            if (not isinstance(cancelled_results, dict)
+                    or cancelled_results.get("action") != "navigate"
+                    or not isinstance(cancelled_results.get("goal"), str)
+                    or not cancelled_results["goal"]):
+                raise RuntimeError(
+                    "simple navigation returned malformed action object: "
+                    f"{cancelled_results!r}"
+                )
+        else:
+            if not isinstance(cancelled_results, list) or not cancelled_results:
+                raise RuntimeError(
+                    f"hierarchical task returned invalid stage list: {cancelled_results!r}"
+                )
+            if any(not isinstance(item, dict) for item in cancelled_results):
+                raise RuntimeError(f"hierarchical stage result is not an object: {cancelled_results!r}")
+            nav_stages = [
+                item for item in cancelled_results
+                if item.get("task_tool") == "nav" and item.get("task_action") == "navigate"
+            ]
+            if not nav_stages:
+                raise RuntimeError(
+                    f"hierarchical cancellation lacks an executed navigation stage: {cancelled_results}"
+                )
+            if any(
+                (item.get("task_tool"), item.get("task_action"))
+                in (("vision", "find_object"), ("robot", "approach"))
+                for item in cancelled_results
+            ):
+                raise RuntimeError(
+                    f"cancellation allowed dependent find/approach stages to execute: {cancelled_results}"
+                )
 
         terminal_statuses = {
             GoalStatus.STATUS_SUCCEEDED,
@@ -307,6 +382,8 @@ def main():
         followup.task = f"导航到 {followup_goal[0]},{followup_goal[1]},0"
         followup.task_id = uuid.uuid4().hex
         followup_future = node.task_client.call_async(followup)
+        active_task_future = followup_future
+        active_task_id = followup.task_id
         if not node.spin_until(lambda: followup_future.done(), 90.0):
             raise RuntimeError("follow-up navigation did not finish")
         followup_response = followup_future.result()
@@ -331,6 +408,7 @@ def main():
                 f"status_diagnostic={node.navigation_status_diagnostic()}"
             )
         followup_goal_id = next(iter(followup_goal_ids()))
+        _validate_goal_uuid(followup_goal_id, "follow-up Nav2 goal id")
         terminal_statuses = {
             GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED,
         }
@@ -384,14 +462,15 @@ def main():
     finally:
         if task_future is not None and not scenario_passed:
             try:
-                cleanup_request = CancelTask.Request()
-                cleanup_request.task_id = (followup.task_id if "followup" in locals()
-                                           else request.task_id)
-                cleanup_future = node.cancel_client.call_async(cleanup_request)
-                node.spin_until(lambda: cleanup_future.done(), 3.0)
-                node.spin_until(lambda: task_future.done(), 3.0)
-                print("failure_cleanup_cancel: requested; "
-                      f"cancel_done={cleanup_future.done()}, task_done={task_future.done()}", flush=True)
+                if active_task_future is not None:
+                    cleanup_request = CancelTask.Request()
+                    cleanup_request.task_id = active_task_id
+                    cleanup_future = node.cancel_client.call_async(cleanup_request)
+                    node.spin_until(lambda: cleanup_future.done(), 5.0)
+                    node.spin_until(lambda: active_task_future.done(), 5.0)
+                    print("failure_cleanup_cancel: requested; "
+                          f"task_id={active_task_id}, cancel_done={cleanup_future.done()}, "
+                          f"active_task_done={active_task_future.done()}", flush=True)
             except Exception as exc:
                 print(f"failure_cleanup_cancel_error: {exc}", flush=True)
         node.destroy_node()

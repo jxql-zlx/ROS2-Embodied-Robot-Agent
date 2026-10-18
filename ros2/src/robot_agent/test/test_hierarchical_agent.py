@@ -15,37 +15,47 @@ class _FakeRobotTool:
     def __init__(self):
         self.actions = []
         self.range_available = True
+        self._latest_command_id = None
+
+    @property
+    def latest_command_id(self):
+        return self._latest_command_id
+
+    def _append_action(self, action):
+        self.actions.append(action)
+        if action.get("action") in ("move", "rotate", "stop"):
+            self._latest_command_id = f"test-command-{len(self.actions)}"
 
     def status_stamp(self):
         return (0, len(self.actions))
 
-    def wait_for_motion_complete(self, *_args):
-        return True
+    def wait_for_motion_complete(self, *_args, command_id=None, **_kwargs):
+        return command_id is None or command_id == self._latest_command_id
 
     def get_sensor(self, _name):
         moved = any(a.get("action") == "move" for a in self.actions)
         return {"available": self.range_available, "distance": 0.6 if moved else 1.0}
 
     def execute_action(self, action):
-        self.actions.append(action)
+        self._append_action(action)
         return True
 
     def move(self, linear_x=0.0, linear_y=0.0, angular_z=0.0, duration=0.0):
-        self.actions.append(
+        self._append_action(
             {"action": "move", "linear_x": linear_x, "linear_y": linear_y, "angular_z": angular_z, "duration": duration}
         )
         return True
 
     def rotate(self, angular_z, duration=0.0):
-        self.actions.append({"action": "rotate", "angular_z": angular_z, "duration": duration})
+        self._append_action({"action": "rotate", "angular_z": angular_z, "duration": duration})
         return True
 
     def stop(self):
-        self.actions.append({"action": "stop"})
+        self._append_action({"action": "stop"})
         return True
 
-    def wait_for_stop_confirmation(self, *_args, **_kwargs):
-        return True
+    def wait_for_stop_confirmation(self, *_args, command_id=None, **_kwargs):
+        return command_id is None or command_id == self._latest_command_id
 
 
 class _FakeVisionTool:
@@ -336,7 +346,9 @@ class TestHierarchicalAgent(unittest.TestCase):
         agent = build_hierarchical_agent(robot_tool=robot, vision_tool=_FakeVisionTool())
         results = agent.run("找杯子")
         self.assertTrue(all(r.success for r in results))
-        self.assertEqual(results[-1].data["approach"]["distance"], 0.6)
+        approach = results[-1].data["approach"]
+        self.assertEqual(approach["clearance"]["distance"], 0.6)
+        self.assertFalse(approach["target_arrival_confirmed"])
         self.assertEqual([a["action"] for a in robot.actions], ["move", "stop"])
 
     def test_range_failure_does_not_trigger_blind_search_rotation(self):
@@ -370,6 +382,36 @@ class TestHierarchicalAgent(unittest.TestCase):
         results = agent.run("navigate multi-step goal")
         self.assertEqual(planner.replan_calls, 1)
         self.assertTrue(any("recovery limit reached" in result.message for result in results))
+
+    def test_reused_agent_discards_pending_tasks_from_cancelled_run(self):
+        class TwoStagePlanner(BasePlanner):
+            def plan(self, goal):
+                return Plan(goal=goal, tasks=[
+                    Task(id=1, tool="robot", action="stop"),
+                    Task(id=2, tool="robot", action="rotate", depends_on=[1]),
+                ])
+
+            def replan(self, goal, task, result):
+                return self.plan(goal)
+
+        class CancelFirstRunExecutor(BaseExecutor):
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, task, context):
+                self.calls.append(task.id)
+                if len(self.calls) == 1:
+                    context["_cancel_event"].set()
+                return TaskResult(task.id, True, "done")
+
+        executor = CancelFirstRunExecutor()
+        agent = HierarchicalAgent(TwoStagePlanner(), executor)
+        first = agent.run("导航多阶段目标", cancel_event=threading.Event())
+        self.assertTrue(first[-1].data["cancelled"])
+
+        second = agent.run("导航多阶段目标", cancel_event=threading.Event())
+        self.assertTrue(all(result.success for result in second), [r.message for r in second])
+        self.assertEqual(executor.calls, [1, 1, 2])
 
 
 if __name__ == "__main__":

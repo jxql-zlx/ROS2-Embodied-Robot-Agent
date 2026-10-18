@@ -14,6 +14,7 @@ class Robot:
         self.step = 0
         self.actions = []
         self.stop_result = stop_result
+        self.latest_command_id = None
 
     def get_sensor(self, _name):
         value = self.ranges[min(self.step, len(self.ranges) - 1)]
@@ -27,14 +28,16 @@ class Robot:
 
     def execute_action(self, command):
         self.actions.append(command)
+        self.latest_command_id = f"motion-{len(self.actions)}"
         return True
 
-    def wait_for_motion_complete(self, *_args):
+    def wait_for_motion_complete(self, *_args, **_kwargs):
         self.step += 1
         return True
 
     def stop(self):
         self.actions.append({"action": "stop"})
+        self.latest_command_id = f"stop-{len(self.actions)}"
         return self.stop_result
 
     def wait_for_stop_confirmation(self, *_args, **_kwargs):
@@ -119,7 +122,7 @@ class TestApproachScenarios(unittest.TestCase):
         self.assertEqual(robot.actions, [{"action": "stop"}])
 
     def test_near_and_far_starting_distances_complete_within_step_budget(self):
-        for ranges in ([0.8, 0.6], [1.3, 1.1, 0.9, 0.7, 0.6]):
+        for ranges in ([0.8, 0.6], [1.3, 1.1, 0.9, 0.85, 0.6]):
             with self.subTest(ranges=ranges):
                 robot = Robot(ranges)
                 result = ApproachController(robot, Vision(["center"] * len(ranges)), MockLLM()).run("cup", "find cup")
@@ -173,7 +176,7 @@ class TestApproachScenarios(unittest.TestCase):
         cancel_event = threading.Event()
         robot = Robot([1.0])
 
-        def wait_for_cancel(_stamp, _timeout, cancel_event=None):
+        def wait_for_cancel(_stamp, _timeout, cancel_event=None, command_id=None):
             cancel_event.wait(2.0)
             return False
 

@@ -11,6 +11,52 @@ class PlanValidationError(ValueError):
     """Raised when a planner returns a malformed or unsafe task graph."""
 
 
+def _is_finite_number(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _validate_task_params(task: "Task") -> None:
+    """Validate only parameters the current executor actually accepts."""
+    if task.tool == "nav" and task.action == "navigate":
+        allowed = {"timeout"}
+    elif task.tool == "vision":
+        allowed = {"conf"}
+    elif task.tool == "robot" and task.action == "move":
+        allowed = {"linear_x", "linear_y", "angular_z", "duration"}
+    elif task.tool == "robot" and task.action == "rotate":
+        allowed = {"angular_z", "duration"}
+    else:
+        allowed = set()
+    extra = set(task.params) - allowed
+    if extra:
+        raise PlanValidationError(
+            f"task {task.id} has unsupported {task.tool}/{task.action} params: {sorted(extra)}"
+        )
+
+    for name, value in task.params.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PlanValidationError(f"task {task.id} param {name} must be numeric")
+        try:
+            finite = _is_finite_number(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise PlanValidationError(f"task {task.id} param {name} must be finite")
+        if name in ("linear_x", "linear_y") and abs(value) > 1.0:
+            raise PlanValidationError(f"task {task.id} param {name} exceeds 1 m/s")
+        if name == "angular_z" and abs(value) > 2.0:
+            raise PlanValidationError(f"task {task.id} param {name} exceeds 2 rad/s")
+        if name == "duration" and not 0 < value <= 30.0:
+            raise PlanValidationError(f"task {task.id} motion duration must be between 0 and 30 seconds")
+        if name == "timeout" and not 0 < value <= 600.0:
+            raise PlanValidationError(f"task {task.id} navigation timeout must be between 0 and 600 seconds")
+        if name == "conf" and not 0 <= value <= 1:
+            raise PlanValidationError(f"task {task.id} confidence must be between 0 and 1")
+
+
 @dataclass
 class Task:
     """One low-level unit of work dispatched to a tool."""
@@ -55,6 +101,10 @@ class Task:
             if key in data and (isinstance(data[key], bool) or
                                 not isinstance(data[key], (int, float))):
                 raise PlanValidationError(f"task {key} must be numeric")
+            if key in data and (
+                not _is_finite_number(data[key]) or not 0 <= data[key] <= 100
+            ):
+                raise PlanValidationError(f"task {key} must be finite and between 0 and 100")
         if "params" in data and not isinstance(data["params"], dict):
             raise PlanValidationError("task params must be an object")
         if "depends_on" in data and not isinstance(data["depends_on"], list):
@@ -109,7 +159,7 @@ def _finite_tree(value: Any) -> bool:
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return True
     if isinstance(value, (int, float)):
-        return math.isfinite(value)
+        return _is_finite_number(value)
     if isinstance(value, list):
         return all(_finite_tree(item) for item in value)
     if isinstance(value, dict):
@@ -137,6 +187,8 @@ def validate_plan(plan: Plan) -> None:
             raise PlanValidationError("task ids must be positive integers")
         if task.id in by_id:
             raise PlanValidationError(f"duplicate task id: {task.id}")
+        if not isinstance(task.tool, str) or not isinstance(task.action, str):
+            raise PlanValidationError(f"task {task.id} tool/action must be strings")
         if task.tool not in allowed or task.action not in allowed[task.tool]:
             raise PlanValidationError(f"unsupported tool/action pair: {task.tool}/{task.action}")
         if not isinstance(task.target, str) or not isinstance(task.name, str):
@@ -145,11 +197,12 @@ def validate_plan(plan: Plan) -> None:
             raise PlanValidationError(f"task {task.id} requires a non-empty target")
         if not isinstance(task.params, dict) or not _finite_tree(task.params):
             raise PlanValidationError(f"task {task.id} params must contain finite JSON values")
+        _validate_task_params(task)
         if task.status != "pending":
             raise PlanValidationError(f"task {task.id} must start pending")
         for field_name in ("importance", "urgency", "complexity", "dependency"):
             value = getattr(task, field_name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not _is_finite_number(value):
                 raise PlanValidationError(f"task {task.id} {field_name} must be finite")
             if not 0 <= value <= 100:
                 raise PlanValidationError(f"task {task.id} {field_name} must be between 0 and 100")
@@ -159,11 +212,6 @@ def validate_plan(plan: Plan) -> None:
             raise PlanValidationError(f"task {task.id} depends_on must contain integer ids")
         if len(set(task.depends_on)) != len(task.depends_on) or task.id in task.depends_on:
             raise PlanValidationError(f"task {task.id} has duplicate or self dependencies")
-        if task.action in ("move", "rotate") and "duration" in task.params:
-            duration = task.params["duration"]
-            if (isinstance(duration, bool) or not isinstance(duration, (int, float))
-                    or not math.isfinite(duration) or not 0 < duration <= 30):
-                raise PlanValidationError(f"task {task.id} has unsafe motion duration")
         ids.append(task.id)
         by_id[task.id] = task
     known = set(ids)

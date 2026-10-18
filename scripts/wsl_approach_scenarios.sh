@@ -8,8 +8,10 @@ if [ "$#" -eq 0 ]; then set -- simple hierarchical; fi
 scenario_names="${APPROACH_SCENARIOS:-left right near far blocked absent vision_dropout range_dropout}"
 scenario_names="${scenario_names//,/ }"
 read -r -a scenarios <<< "$scenario_names"
-LOG_DIR=/tmp/approach_scenarios
-mkdir -p "$LOG_DIR"
+LOG_ROOT="${TMPDIR:-/tmp}/approach_scenarios"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXX")"
+echo "RUN_LOG_DIR: $LOG_DIR"
 for mode in "$@"; do
   for scenario in "${scenarios[@]}"; do
     echo ">> validating $mode / $scenario"

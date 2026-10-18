@@ -55,6 +55,17 @@ class TestTaskManager(unittest.TestCase):
         manager.set_status(1, TaskStatus.FAILED)
         self.assertIsNone(manager.next_task())
 
+    def test_adding_plan_does_not_mutate_planner_owned_ids(self):
+        plan = Plan(goal="reusable", tasks=[
+            Task(id=1, tool="robot", action="stop"),
+            Task(id=2, tool="robot", action="rotate", depends_on=[1]),
+        ])
+        manager = TaskManager()
+        manager.add_plan(Plan(goal="occupy id", tasks=[Task(id=1, tool="robot", action="stop")]))
+        manager.add_plan(plan)
+        self.assertEqual([task.id for task in plan.tasks], [1, 2])
+        self.assertEqual(plan.tasks[1].depends_on, [1])
+
 
 if __name__ == "__main__":
     unittest.main()
